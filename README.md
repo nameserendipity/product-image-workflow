@@ -1,0 +1,52 @@
+# 商品图片工作流
+
+本程序支持单商品链接、批量商品链接、产品图批量替换和 Excel 图片搜同款。直链支持淘宝、天猫、京东和抖音；采集内容包括主图、SKU 图、详情图、商品参数、可验证的 SKU 数据和原视频，批量任务可选择“仅采集”或“采集并生成”。淘宝/天猫参考对标商品创作会自动查询私有 OSS 共享素材库，命中时复用完整包，OSS 不可用时继续保存本地。
+
+完整操作步骤见 [操作说明书.md](操作说明书.md)，共享素材库配置见 [docs/oss-shared-library-setup.md](docs/oss-shared-library-setup.md)，抖音和产品图批量替换说明见 [docs/douyin-direct-replace-user-guide.md](docs/douyin-direct-replace-user-guide.md)。
+
+## 便携发布包使用方法
+
+1. 解压完整发布包。
+2. 双击 `启动程序.bat`，浏览器会打开本地界面。
+3. 完整便携包已包含不带密钥的本机配置；打开网页后按弹窗输入视觉模型和生图模型 Key。只有源码运行时才需要将 `local_settings.example.json` 复制为 `local_settings.json` 并填写 API 地址与 OSS 配置。
+
+Python、Playwright 和程序依赖已包含在完整发布包中，无需另外安装。首次采集仍需在弹出的浏览器中登录并启用店透视扩展。
+
+## 源码包使用方法
+
+源码包仅供开发或无法使用便携包时使用：先安装 64 位 Python 3.12 或更新版本，再双击 `安装依赖.bat`，最后运行 `启动程序.bat`。
+
+## 使用说明
+
+- 在“商品链接”输入框粘贴淘宝、天猫、京东或抖音商品链接。单链接和批量链接使用相同的平台直采逻辑；工作流选择和数量只控制后续生成。
+- 生成时可直接以对标商品第一张主图作为商品身份，也可上传自己的商品图。首次使用必须在程序弹出的采集浏览器中登录淘宝并确认店透视可用。登录档案固定保存在 `%LOCALAPPDATA%\ProductImageWorkflow\store-insight-profile`，升级或更换程序目录后仍会复用。
+- 网页右侧“采集浏览器”提供“挖象浏览器”和“微软 Edge”二选一。选择后程序会自动检测安装位置并保存，单链接采集和 Excel 批处理都会使用该浏览器。
+- 下载和生成结果保存在 `outputs` 文件夹，可通过页面中的“打开文件夹”按钮查看。
+- 采集或生成过程可在页面中停止。停止采集会关闭当前采集子进程，不会删除已下载的图片。
+- Excel 图片搜同款优先读取“1688商品图”列，没有该字段时按嵌入图片顺序读取；淘宝结果按销量排序，素材不足时最多从 5 款商品补采，视频最多检查 3 款。批量链接表格则按链接逐行直接采集，不搜索第二款商品。两种批量任务都支持“仅采集”和“采集并生成”。
+- 淘宝出现登录、滑块、“符合镜像原理”等验证时，脚本暂停点击、滚动和刷新，最长等待 10 分钟，验证完成后继续。
+
+## 配置示例
+
+`local_settings.example.json` 是不含密钥的配置模板：
+
+```json
+{
+  "base_url": "https://your-api-host.example",
+  "browser_choice": ""
+}
+```
+
+两个模型 Key 首次通过网页弹窗输入，后端会将其写入已被 Git 忽略的本机 `local_settings.json`。刷新页面或重启服务后会自动恢复，不需要重复输入；网页和状态接口只显示是否已配置，不返回 Key 内容。
+
+## 开发与自测
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -v
+cd frontend
+$env:PATH = "D:\NodeJS;$env:PATH"
+D:\NodeJS\npm.cmd install
+D:\NodeJS\npm.cmd run build
+```
+
+网页源码使用 React、Vite 和 TypeScript，位于 `frontend` 目录。`npm run build` 会把生产文件写入 `web`，Python 后端和便携 EXE 只读取构建后的静态文件，用户电脑不需要安装 Node.js。

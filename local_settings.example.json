@@ -1,0 +1,9 @@
+{
+  "base_url": "https://your-api-host.example",
+  "browser_choice": "",
+  "oss": {
+    "endpoint": "https://oss-cn-shenzhen.aliyuncs.com",
+    "bucket": "transform-image",
+    "prefix": "product-workflow"
+  }
+}
