@@ -175,6 +175,8 @@ class AppStateTaskIsolationTests(unittest.TestCase):
         with (
             patch.object(web_app, "STATE", state),
             patch.object(web_app, "load_shared_library_client", return_value=client),
+            patch.object(web_app, "load_browser_choice", return_value="edge"),
+            patch.object(web_app, "load_browser_executable", return_value="edge.exe"),
             patch.object(web_app.threading.Thread, "start") as start,
         ):
             error = handler._begin_collection()
@@ -258,6 +260,8 @@ class AppStateTaskIsolationTests(unittest.TestCase):
         with (
             patch.object(web_app, "STATE", state),
             patch.object(web_app, "load_shared_library_client", return_value=client),
+            patch.object(web_app, "load_browser_choice", return_value="edge"),
+            patch.object(web_app, "load_browser_executable", return_value="edge.exe"),
             patch.object(web_app.threading.Thread, "start") as start,
         ):
             error = handler._begin_collection()

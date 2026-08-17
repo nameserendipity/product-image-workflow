@@ -61,6 +61,20 @@ from same_item_collector import (
 )
 
 
+def _configure_console_encoding() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+
+
+_configure_console_encoding()
+
+
 ASSET_LABELS = {
     "main": ("1:1图", "1:1主图", "主图图片", "页面图", "页面展示主图"),
     "sku": ("仅SKU图", "SKU图", "仅 SKU 图", "sku图", "sku图片"),
