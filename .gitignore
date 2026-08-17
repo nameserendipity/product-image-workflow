@@ -1,4 +1,7 @@
 .venv/
+.runtime/
+.bootstrap-cache/
+.bootstrap-state.json
 outputs/
 work/
 __pycache__/
