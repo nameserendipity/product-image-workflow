@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from platform_urls import (
     TAOBAO_SHORT_HOSTS,
     is_douyin_product_host,
+    kuaishou_product_id,
     is_taobao_host,
     is_tmall_host,
 )
@@ -35,7 +36,7 @@ def classify_message(message: str, state: dict, base_url: str, api_key: str) -> 
     prompt = f"""你是电商图片工作流的意图识别器。只返回 JSON，不要 Markdown，不要解释。
 根据用户消息和当前状态，提取以下字段：
 action: reset、update_task、answer、clarify 四选一；
-reference_url: 淘宝、天猫、京东或抖音商品链接，没有则为 null；
+reference_url: 淘宝、天猫、京东、抖音或快手商品链接，没有则为 null；
 quantity_mode: reference、custom、unspecified 三选一；
 main_count: quantity_mode 为 custom 时填 1 到 999 的整数，否则为 null；
 sku_count: 用户明确指定 SKU 图数量时填 1 到 8 的整数，否则为 null；
@@ -166,7 +167,7 @@ class AgentSession:
         if isinstance(raw_url, str) and raw_url.strip():
             url = self._find_url(raw_url.strip()) or raw_url.strip()
             if not self._is_supported_url(url):
-                return self._reply("请提供淘宝、天猫或京东商品链接。")
+                return self._reply("请提供淘宝、天猫、京东、抖音或快手商品链接。")
             if url != self.reference_url:
                 self.max_main_images = DEFAULT_MAIN_IMAGES
                 self.max_sku_images = None
@@ -228,7 +229,7 @@ class AgentSession:
 
         if not self.reference_url:
             self.awaiting = "reference_url"
-            return self._reply(str(intent.get("reply") or "请先提供淘宝、天猫或京东商品链接。"))
+            return self._reply(str(intent.get("reply") or "请先提供淘宝、天猫、京东、抖音或快手商品链接。"))
         if not self.quantity_confirmed:
             self.awaiting = "main_quantity"
             return self._reply("请确认按对标商品数量，或指定主图数量。")
@@ -262,9 +263,9 @@ class AgentSession:
 
         if self.awaiting == "reference_url":
             if not url:
-                return self._reply("请先提供对标商品链接（淘宝、天猫或京东）。")
+                return self._reply("请先提供对标商品链接（淘宝、天猫、京东、抖音或快手）。")
             if not self._is_supported_url(url):
-                return self._reply("该链接不是支持的淘宝、天猫或京东商品链接，请重新提供对标商品链接。")
+                return self._reply("该链接不是支持的淘宝、天猫、京东、抖音或快手商品链接，请重新提供对标商品链接。")
             self.reference_url = url
             self.quantity_confirmed = True
             self.max_main_images = DEFAULT_MAIN_IMAGES
@@ -278,7 +279,7 @@ class AgentSession:
         if self.awaiting == "main_quantity":
             if url:
                 if not self._is_supported_url(url):
-                    return self._reply("该链接不受支持，请提供淘宝、天猫或京东商品链接。")
+                    return self._reply("该链接不受支持，请提供淘宝、天猫、京东、抖音或快手商品链接。")
                 self.reference_url = url
                 return self._reply(
                     "已更新对标商品链接。是否按对标商品的主图实际数量采集？"
@@ -453,6 +454,7 @@ class AgentSession:
             or is_taobao_host(host)
             or is_tmall_host(host)
             or is_douyin_product_host(host)
+            or bool(kuaishou_product_id(value))
             or host == "jd.com"
             or host.endswith(".jd.com")
         )

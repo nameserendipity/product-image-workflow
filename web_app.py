@@ -1244,7 +1244,7 @@ class RequestHandler(SimpleHTTPRequestHandler):
             self._json({"error": "请填写对标商品链接。"}, HTTPStatus.BAD_REQUEST)
             return
         if not AgentSession._is_supported_url(reference_url):
-            self._json({"error": "该链接不是支持的淘宝、天猫、京东或抖音商品链接。"}, HTTPStatus.BAD_REQUEST)
+            self._json({"error": "该链接不是支持的淘宝、天猫、京东、抖音或快手商品链接。"}, HTTPStatus.BAD_REQUEST)
             return
         with STATE.lock:
             if STATE.collecting or STATE.generating or STATE.batch_running:

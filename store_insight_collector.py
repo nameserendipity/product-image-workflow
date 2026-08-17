@@ -28,7 +28,22 @@ from playwright.sync_api import Browser, Page, Playwright, TimeoutError as Playw
 from playwright.sync_api import sync_playwright
 
 from douyin_collector import download_douyin_package, materialize_douyin_package
-from platform_urls import is_douyin_product_host, is_taobao_host, is_tmall_host
+from kuaishou_collector import (
+    build_assets as build_kuaishou_assets,
+    classify_image_url as classify_kuaishou_image_url,
+    dedupe_urls as dedupe_kuaishou_urls,
+    extract_product_payload as extract_kuaishou_product_payload,
+    materialize_assets as materialize_kuaishou_assets,
+    merge_product_payloads as merge_kuaishou_product_payloads,
+    product_media_token as kuaishou_product_media_token,
+)
+from platform_urls import (
+    is_douyin_product_host,
+    is_kuaishou_product_host,
+    is_taobao_host,
+    is_tmall_host,
+    kuaishou_product_id,
+)
 from parameter_collector import collect_product_parameters, empty_parameter_metadata
 from same_item_collector import (
     click_first_visible_text,
@@ -100,6 +115,11 @@ def parse_args() -> argparse.Namespace:
 def validate_item_url(value: str) -> tuple[str, str]:
     parsed = urlparse(value.strip())
     host = parsed.hostname.lower() if parsed.hostname else ""
+    if is_kuaishou_product_host(host):
+        product_id = kuaishou_product_id(value)
+        if not product_id:
+            raise ValueError("The Kuaishou URL must be an app.kwaixiaodian.com product page with a numeric id")
+        return value.strip(), product_id
     supported = (
         is_taobao_host(host)
         or is_tmall_host(host)
@@ -108,7 +128,7 @@ def validate_item_url(value: str) -> tuple[str, str]:
         or is_douyin_product_host(host)
     )
     if not parsed.scheme.startswith("http") or not supported:
-        raise ValueError("Only Taobao, Tmall, JD, and Douyin item URLs are supported by this collector")
+        raise ValueError("Only Taobao, Tmall, JD, Douyin, and Kuaishou item URLs are supported by this collector")
     product_id = parse_qs(parsed.query).get("id", [""])[0]
     if not product_id and (host == "jd.com" or host.endswith(".jd.com")):
         matched = re.search(r"/(\d+)\.html", parsed.path)
@@ -1167,6 +1187,122 @@ def build_manifest(
     }
 
 
+def collect_kuaishou_payload(
+    page: Page,
+    item_url: str,
+    product_id: str,
+    output_root: Path,
+    selected_types: set[str],
+    timeout_ms: int,
+    login_wait_seconds: int,
+    max_main_images: int | None,
+) -> tuple[list[dict], dict]:
+    responses: list[Any] = []
+
+    def record_response(response: Any) -> None:
+        responses.append(response)
+
+    page.on("response", record_response)
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
+        page.wait_for_timeout(2500)
+        wait_for_platform_challenge(page, login_wait_seconds)
+        for _ in range(4):
+            page.evaluate("window.scrollBy(0, Math.max(window.innerHeight, 700))")
+            page.wait_for_timeout(500)
+        page_title = page.title()
+        dom_urls = dedupe_kuaishou_urls(
+            page.locator("img").evaluate_all(
+                "elements => elements.map(element => element.currentSrc || element.src).filter(Boolean)"
+            )
+        )
+    finally:
+        try:
+            page.remove_listener("response", record_response)
+        except Exception:
+            pass
+
+    response_payloads: list[dict[str, object]] = []
+    base_url = ""
+    for candidate in dom_urls:
+        parsed_candidate = urlparse(candidate)
+        if classify_kuaishou_image_url(candidate) and parsed_candidate.scheme and parsed_candidate.netloc:
+            base_url = f"{parsed_candidate.scheme}://{parsed_candidate.netloc}"
+            break
+    for response in responses:
+        try:
+            response_url = str(response.url)
+            content_type = str(response.header_value("content-type") or "").lower()
+        except Exception:
+            continue
+        if "json" not in content_type and not any(marker in response_url.lower() for marker in ("api", "goods", "detail")):
+            continue
+        try:
+            payload = response.json()
+        except Exception:
+            continue
+        response_payloads.append(
+            extract_kuaishou_product_payload(payload, base_url=base_url, product_id=product_id)
+        )
+
+    extracted = merge_kuaishou_product_payloads(response_payloads)
+    media_tokens = {
+        token
+        for field in ("mainImageUrls", "detailImageUrls")
+        for url in (extracted.get(field) or [])
+        if (token := kuaishou_product_media_token(str(url)))
+    }
+    if not media_tokens:
+        raise RuntimeError("快手页面未采集到有效主图，无法确认商品身份")
+
+    def belongs_to_product(url: str) -> bool:
+        return kuaishou_product_media_token(url) in media_tokens
+
+    extracted["mainImageUrls"] = dedupe_kuaishou_urls(
+        [
+            *(url for url in (extracted.get("mainImageUrls") or []) if belongs_to_product(str(url))),
+            *(url for url in dom_urls if classify_kuaishou_image_url(url) == "main" and belongs_to_product(url)),
+        ]
+    )
+    extracted["detailImageUrls"] = dedupe_kuaishou_urls(
+        [
+            *(url for url in (extracted.get("detailImageUrls") or []) if belongs_to_product(str(url))),
+            *(url for url in dom_urls if classify_kuaishou_image_url(url) == "detail" and belongs_to_product(url)),
+        ]
+    )
+    extracted["videoUrls"] = dedupe_kuaishou_urls(extracted.get("videoUrls") or [])
+    assets = build_kuaishou_assets(extracted, max_main_images)
+    for category in ("main", "detail"):
+        if category not in selected_types:
+            assets[category] = []
+    records, download_failures = materialize_kuaishou_assets(assets, output_root, item_url)
+    collected_types = [
+        asset_type
+        for asset_type in ASSET_TYPES
+        if asset_type in selected_types and any(record.get("type") == asset_type for record in records)
+    ]
+    video_record = next((record for record in records if record.get("type") == "video"), None)
+    metadata = {
+        "product_title": str(extracted.get("title") or page_title or "").strip(),
+        "current_price": str(extracted.get("price") or "").strip(),
+        **empty_parameter_metadata(product_id, "not_found", "快手公开页面未提供稳定的结构化商品参数"),
+        **empty_sku_metadata(),
+        "sku_metadata_error": "快手公开页面未提供稳定 SKU 图片映射；可使用表格 SKU 截图补充",
+        "main_video_requested": True,
+        "main_video_url": str((video_record or {}).get("source_url") or ""),
+        "main_video_status": "ok" if video_record else "not_found",
+        "main_video_error": "" if video_record else "快手公开页面未提供可下载视频",
+        "requested_asset_types": sorted(selected_types),
+        "collected_asset_types": collected_types,
+        "missing_asset_types": [
+            asset_type for asset_type in sorted(selected_types) if asset_type not in collected_types
+        ],
+    }
+    if download_failures:
+        metadata["asset_download_failures"] = download_failures
+    return records, metadata
+
+
 def collect_store_insight_payload(
     page: Page,
     context: Any,
@@ -1180,6 +1316,19 @@ def collect_store_insight_payload(
     login_wait_seconds: int,
     max_main_images: int | None,
 ) -> tuple[list[dict], dict]:
+    if platform == "kuaishou":
+        wait_for_platform_challenge(page, login_wait_seconds)
+        print("[collector] 正在采集快手公开商品素材。", flush=True)
+        return collect_kuaishou_payload(
+            page,
+            item_url,
+            product_id,
+            output_root,
+            selected_types,
+            timeout_ms,
+            login_wait_seconds,
+            max_main_images,
+        )
     if platform == "douyin":
         wait_for_platform_challenge(page, login_wait_seconds)
         print("[collector] 正在下载店透视抖音商品资料（多文件）包。", flush=True)
@@ -1309,7 +1458,12 @@ def main() -> int:
     ACTION_DELAY_MS = max(0, round(args.action_delay_seconds * 1000))
     item_url, product_id = validate_item_url(args.url)
     item_host = (urlparse(item_url).hostname or "").lower()
-    platform = "douyin" if is_douyin_product_host(item_host) else "commerce"
+    if is_douyin_product_host(item_host):
+        platform = "douyin"
+    elif is_kuaishou_product_host(item_host):
+        platform = "kuaishou"
+    else:
+        platform = "commerce"
     selected_types = tuple(dict.fromkeys(args.types))
     allowed_types = set(selected_types)
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")

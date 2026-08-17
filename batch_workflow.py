@@ -39,8 +39,10 @@ from oss_uploader import OssUploader, upload_generation_records, upload_video_if
 from platform_urls import (
     TAOBAO_SHORT_HOSTS,
     is_douyin_product_host,
+    is_kuaishou_product_host,
     is_taobao_host,
     is_tmall_host,
+    kuaishou_product_id,
 )
 from product_identity import ProductIdentity, ProductIdentityError, ProductIdentityResolver
 from shared_library_cache import SharedLibraryCache
@@ -145,6 +147,8 @@ def _direct_link_platform(value: str) -> tuple[str, str]:
     if is_douyin_product_host(host):
         product_id = parse_qs(parsed.query).get("id", [""])[0]
         return ("douyin", "") if product_id else ("invalid", "抖音商品链接缺少商品 ID")
+    if is_kuaishou_product_host(host):
+        return ("kuaishou", "") if kuaishou_product_id(value) else ("invalid", "快手商品链接路径或商品 ID 无效")
     return "unsupported", "不支持的商品链接平台"
 
 
@@ -230,6 +234,7 @@ def extract_direct_link_items(
             "天猫链接",
             "京东链接",
             "抖音链接",
+            "快手链接",
             "url",
         }
         for row in sheet.iter_rows(min_row=1, max_row=min(sheet.max_row, 10)):
@@ -288,7 +293,7 @@ def extract_direct_link_items(
 
 DIRECT_REPLACE_HEADERS = {
     "image": {"商品图", "产品图", "我方商品图", "1688商品图"},
-    "link": {"商品链接", "对标链接", "竞品链接", "url", "淘宝链接", "天猫链接", "京东链接", "抖音链接"},
+    "link": {"商品链接", "对标链接", "竞品链接", "url", "淘宝链接", "天猫链接", "京东链接", "抖音链接", "快手链接"},
     "title": {"标题", "商品标题", "商品名称", "名称"},
     "sku_name": {"sku名称", "sku名", "规格名称"},
     "color": {"颜色", "颜色分类"},
@@ -488,7 +493,7 @@ def resolve_supplement_workbook(workbook_path: Path, project_root: Path) -> Supp
     source_url = str(values.get("来源商品链接") or values.get("1688商品链接") or "").strip()
     title = str(values.get("source_title") or values.get("来源商品标题") or values.get("淘宝商品标题") or "").strip()
     platform_label = str(values.get("来源平台") or "").strip()
-    platform = {"淘宝": "taobao", "天猫": "tmall", "京东": "jd", "抖音": "douyin"}.get(platform_label, "")
+    platform = {"淘宝": "taobao", "天猫": "tmall", "京东": "jd", "抖音": "douyin", "快手": "kuaishou"}.get(platform_label, "")
     if source_url and not platform:
         platform, _ = _direct_link_platform(source_url)
     own_product_value = str(values.get("我方商品图") or "").strip()
@@ -531,7 +536,7 @@ def resolve_supplement_workbook(workbook_path: Path, project_root: Path) -> Supp
             ),
         )
         generation_mode = "own_product"
-    elif direct_manifest and platform in {"taobao", "tmall", "jd", "douyin"}:
+    elif direct_manifest and platform in {"taobao", "tmall", "jd", "douyin", "kuaishou"}:
         item: BatchItem | DirectLinkBatchItem = DirectLinkBatchItem(
             1,
             int(values.get("source_row") or 1),
@@ -1299,7 +1304,7 @@ def _direct_collection_identity(value: str, product_id: str = "") -> tuple[str, 
     host = (parsed.hostname or "").lower()
     resolved_product_id = str(product_id or "").strip()
     if not resolved_product_id:
-        if platform in {"taobao", "tmall", "douyin"}:
+        if platform in {"taobao", "tmall", "douyin", "kuaishou"}:
             resolved_product_id = parse_qs(parsed.query).get("id", [""])[0]
         elif platform == "jd":
             matched = re.search(r"/(\d+)\.html", parsed.path)
@@ -1643,7 +1648,7 @@ def export_product_workbook(
     ]
     video_url = str(source.get("main_video_url") or "")
     if isinstance(item, (DirectLinkBatchItem, DirectReplaceBatchItem)):
-        platform_name = {"taobao": "淘宝", "tmall": "天猫", "jd": "京东", "douyin": "抖音"}.get(item.platform, item.platform)
+        platform_name = {"taobao": "淘宝", "tmall": "天猫", "jd": "京东", "douyin": "抖音", "kuaishou": "快手"}.get(item.platform, item.platform)
         source_overview = [
             ["来源平台", platform_name],
             ["来源商品链接", item.source_url],
