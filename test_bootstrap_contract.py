@@ -31,6 +31,18 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertIn('runtime_manifest_sha256', self.script)
         self.assertIn('$manifestHash = Get-Sha256 $ManifestPath', self.script)
 
+    def test_creates_runtime_directory_before_chromium_marker(self) -> None:
+        function = re.search(
+            r"function Ensure-Chromium.*?\n}\n",
+            self.script,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(function)
+        body = function.group(0)
+        create_index = body.index("New-Item -ItemType Directory -Force -Path $RuntimeRoot")
+        marker_index = body.index('Set-Content -LiteralPath $marker')
+        self.assertLess(create_index, marker_index)
+
     @unittest.skipUnless(__import__("platform").system() == "Windows", "PowerShell contract smoke test is Windows-only")
     def test_check_mode_is_non_interactive(self) -> None:
         result = subprocess.run(

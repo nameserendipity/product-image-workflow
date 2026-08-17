@@ -126,6 +126,7 @@ function Ensure-Dependencies([string]$VenvPython, [string]$LockHash, $State) {
 }
 
 function Ensure-Chromium([string]$VenvPython, [string]$LockHash, $State) {
+    New-Item -ItemType Directory -Force -Path $RuntimeRoot | Out-Null
     $marker = Join-Path $RuntimeRoot "playwright-chromium.ready"
     if ($State.playwright_sha256 -eq $LockHash -and (Test-Path -LiteralPath $marker)) { return }
     Write-Step "正在安装 Playwright Chromium..."
