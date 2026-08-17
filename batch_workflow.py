@@ -55,6 +55,7 @@ from shared_library_client import (
 )
 from shared_package_builder import SharedPackageBuilder, materialize_reused_package
 from spreadsheet_inputs import extract_embedded_images, normalize_header
+from workbook_exporter import export_workbook_payload
 
 
 class BatchCollectionPaused(RuntimeError):
@@ -1565,20 +1566,6 @@ def _sku_rows(
     return rows[:SUPPLEMENT_LIMITS["sku"]]
 
 
-def _find_node_executable(project_root: Path) -> str:
-    candidates = [
-        os.environ.get("PRODUCT_WORKFLOW_NODE", ""),
-        str(project_root / "runtime" / "node.exe"),
-        shutil.which("node") or "",
-        r"D:\nodejs\node.exe",
-        r"D:\NodeJS\node.exe",
-    ]
-    for candidate in candidates:
-        if candidate and Path(candidate).is_file():
-            return candidate
-    raise RuntimeError("未找到表格导出所需的 Node.js 运行时，请使用完整发布包或配置 PRODUCT_WORKFLOW_NODE。")
-
-
 def ensure_workbook_available(output_path: Path) -> None:
     lock_path = output_path.with_name(f"~${output_path.name}")
     if lock_path.exists():
@@ -1586,37 +1573,6 @@ def ensure_workbook_available(output_path: Path) -> None:
             f"Excel/WPS 正在占用结果表格：{output_path}。"
             "请关闭该表格后再重试补图，已生成的图片不会丢失。"
         )
-
-
-def _export_with_artifact_tool(project_root: Path, output_path: Path, payload: dict[str, Any]) -> Path:
-    runtime_dir = project_root / "spreadsheet_runtime"
-    exporter = runtime_dir / "exporter.mjs"
-    if not exporter.is_file():
-        raise RuntimeError(f"表格导出器不存在：{exporter}")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    payload_path = output_path.with_suffix(".export.json")
-    payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        subprocess.run(
-            [_find_node_executable(project_root), str(exporter), str(payload_path)],
-            cwd=str(project_root),
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except subprocess.CalledProcessError as error:
-        detail = (error.stderr or error.stdout or "").strip()
-        if "EBUSY" in detail or "resource busy or locked" in detail.lower():
-            raise RuntimeError(
-                f"Excel/WPS 正在占用结果表格：{output_path}。"
-                "请关闭该表格后重试，已生成的图片不会丢失。"
-            ) from error
-        raise RuntimeError(f"表格导出失败：{detail[-1200:]}") from error
-    finally:
-        payload_path.unlink(missing_ok=True)
-    return output_path
 
 
 def export_product_workbook(
@@ -1706,11 +1662,7 @@ def export_product_workbook(
         "title": titles or {},
         "videos": ([{"name": "商品主视频", "url": video_url}] if video_url else []),
     }
-    return _export_with_artifact_tool(
-        project_root=project_root or Path(__file__).resolve().parent,
-        output_path=output_path,
-        payload=payload,
-    )
+    return export_workbook_payload(output_path, payload)
 
 
 class BatchRunner:

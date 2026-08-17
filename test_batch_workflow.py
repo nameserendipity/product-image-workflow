@@ -1686,10 +1686,10 @@ class BatchWorkflowTests(unittest.TestCase):
         )
         item = DirectLinkBatchItem(1, 2, "https://item.jd.com/7002.html", "jd", "京东商品")
 
-        with patch("batch_workflow._export_with_artifact_tool", return_value=self.root / "direct.xlsx") as exporter:
+        with patch("batch_workflow.export_workbook_payload", return_value=self.root / "direct.xlsx") as exporter:
             export_product_workbook(self.root / "direct.xlsx", item, manifest, [])
 
-        overview = dict(exporter.call_args.kwargs["payload"]["overview"][1:])
+        overview = dict(exporter.call_args.args[1]["overview"][1:])
         self.assertEqual(overview["来源平台"], "京东")
         self.assertEqual(overview["来源商品链接"], item.source_url)
         self.assertIn("商品当前价", overview)
@@ -1717,10 +1717,10 @@ class BatchWorkflowTests(unittest.TestCase):
             "douyin",
         )
 
-        with patch("batch_workflow._export_with_artifact_tool", return_value=self.root / "direct-replace.xlsx") as exporter:
+        with patch("batch_workflow.export_workbook_payload", return_value=self.root / "direct-replace.xlsx") as exporter:
             export_product_workbook(self.root / "direct-replace.xlsx", item, manifest, [])
 
-        overview = dict(exporter.call_args.kwargs["payload"]["overview"][1:])
+        overview = dict(exporter.call_args.args[1]["overview"][1:])
         self.assertEqual(overview["来源平台"], "抖音")
         self.assertEqual(overview["来源工作表"], "待处理商品")
         self.assertEqual(overview["我方商品图"], str(self.image))
@@ -1751,10 +1751,10 @@ class BatchWorkflowTests(unittest.TestCase):
         records = []
         item = DirectLinkBatchItem(1, 2, "https://item.jd.com/7003.html", "jd")
 
-        with patch("batch_workflow._export_with_artifact_tool", return_value=self.root / "direct.xlsx") as exporter:
+        with patch("batch_workflow.export_workbook_payload", return_value=self.root / "direct.xlsx") as exporter:
             export_product_workbook(self.root / "direct.xlsx", item, manifest, records)
 
-        rows = exporter.call_args.kwargs["payload"]["main"]
+        rows = exporter.call_args.args[1]["main"]
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(row["generation_status"] == "未生成" for row in rows))
 
@@ -1777,10 +1777,10 @@ class BatchWorkflowTests(unittest.TestCase):
         )
         item = DirectLinkBatchItem(1, 1, "https://item.jd.com/7004.html", "jd")
 
-        with patch("batch_workflow._export_with_artifact_tool", return_value=self.root / "flat.xlsx") as exporter:
+        with patch("batch_workflow.export_workbook_payload", return_value=self.root / "flat.xlsx") as exporter:
             export_product_workbook(self.root / "flat.xlsx", item, manifest, [])
 
-        payload = exporter.call_args.kwargs["payload"]
+        payload = exporter.call_args.args[1]
         self.assertEqual(len(payload["main"]), 1)
         self.assertEqual(len(payload["detail"]), 1)
         self.assertEqual(payload["parameters"][0]["value"], "测试")
@@ -2342,8 +2342,8 @@ class BatchWorkflowTests(unittest.TestCase):
             self.assertEqual(detail.max_row, 3)
             self.assertEqual(len(detail._images), 3)
             sku = workbook["SKU"]
-            self.assertEqual([sku.cell(1, column).value for column in range(1, 13)], [
-                "序号", "商品ID", "SKU标签", "规格", "颜色", "价格", "解析状态", "采集图缩略图", "采集图路径", "生成图缩略图", "生成图路径", "生成图状态"
+            self.assertEqual([sku.cell(1, column).value for column in range(1, 12)], [
+                "序号", "商品ID", "SKU标签", "规格", "颜色", "价格", "采集图缩略图", "采集图路径", "生成图缩略图", "生成图路径", "生成图状态"
             ])
             self.assertEqual(sku["D2"].value, "2件装")
             self.assertEqual(sku["E2"].value, "黑色")
@@ -2403,7 +2403,7 @@ class BatchWorkflowTests(unittest.TestCase):
         )
         workbook = load_workbook(output, data_only=True)
         try:
-            for sheet_name, source_column in (("主图", "C"), ("SKU", "I"), ("详情图", "C")):
+            for sheet_name, source_column in (("主图", "C"), ("SKU", "H"), ("详情图", "C")):
                 sheet = workbook[sheet_name]
                 self.assertEqual(sheet.max_row, 6)
                 exported_sources = [sheet[f"{source_column}{row}"].value for row in range(2, 7)]
@@ -2437,7 +2437,7 @@ class BatchWorkflowTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with patch("batch_workflow._export_with_artifact_tool", return_value=self.root / "capped.xlsx") as exporter:
+        with patch("batch_workflow.export_workbook_payload", return_value=self.root / "capped.xlsx") as exporter:
             export_product_workbook(
                 self.root / "capped.xlsx",
                 BatchItem(1, 2, "输入标题", self.image, "", "", ""),
@@ -2445,7 +2445,7 @@ class BatchWorkflowTests(unittest.TestCase):
                 [],
             )
 
-        payload = exporter.call_args.kwargs["payload"]
+        payload = exporter.call_args.args[1]
         self.assertEqual(len(payload["main"]), 24)
         self.assertEqual(len(payload["sku"]), 8)
         self.assertEqual(len(payload["detail"]), 15)
@@ -2467,7 +2467,7 @@ class BatchWorkflowTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with patch("batch_workflow._export_with_artifact_tool", return_value=self.root / "metadata-skus.xlsx") as exporter:
+        with patch("batch_workflow.export_workbook_payload", return_value=self.root / "metadata-skus.xlsx") as exporter:
             export_product_workbook(
                 self.root / "metadata-skus.xlsx",
                 DirectLinkBatchItem(1, 2, "https://item.jd.com/123.html", "jd"),
@@ -2476,7 +2476,7 @@ class BatchWorkflowTests(unittest.TestCase):
                 include_metadata_only_skus=True,
             )
 
-        self.assertEqual(len(exporter.call_args.kwargs["payload"]["sku"]), 8)
+        self.assertEqual(len(exporter.call_args.args[1]["sku"]), 8)
 
     def test_sku_export_drops_generated_rows_without_collected_images(self) -> None:
         source = {
