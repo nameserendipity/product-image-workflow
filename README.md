@@ -45,9 +45,8 @@ Python、Playwright 和程序依赖已包含在完整发布包中，无需另外
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -v
 cd frontend
-$env:PATH = "D:\NodeJS;$env:PATH"
-D:\NodeJS\npm.cmd install
-D:\NodeJS\npm.cmd run build
+npm ci
+npm run build
 ```
 
 网页源码使用 React、Vite 和 TypeScript，位于 `frontend` 目录。`npm run build` 会把生产文件写入 `web`，Python 后端和便携 EXE 只读取构建后的静态文件，用户电脑不需要安装 Node.js。
