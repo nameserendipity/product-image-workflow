@@ -1,0 +1,26 @@
+name: Windows smoke
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bootstrap Python environment
+        shell: powershell
+        run: .\bootstrap.ps1 -Mode Ensure -NonInteractive -Root $PWD
+      - name: Run Python tests
+        shell: powershell
+        run: .\.venv\Scripts\python.exe -m unittest discover -q
+      - name: Build frontend
+        shell: powershell
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Verify generated frontend is committed
+        shell: powershell
+        run: git diff --exit-code -- web

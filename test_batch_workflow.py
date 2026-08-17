@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 import shutil
+import zipfile
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -1077,10 +1078,37 @@ class BatchWorkflowTests(unittest.TestCase):
         self.assertEqual(items, [])
 
     def test_direct_replace_extracts_wps_dispimg_rows_without_fixed_columns(self) -> None:
-        fixture_dir = Path(
-            r"C:\Users\Administrator\Documents\xwechat_files\wxid_ex358te1357c22_6c76\msg\file\2026-08"
-        )
-        fixture = next(fixture_dir.glob("*.xlsx"))
+        fixture = self.root / "wps-dispimg.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Sheet1"
+        for row_number in (1, 10, 19, 28):
+            sheet.cell(row_number, 1, f'=DISPIMG("img{row_number}",1)')
+            sheet.cell(row_number, 2, "https://detail.tmall.com/item.htm?id=123456789")
+        workbook.save(fixture)
+        image_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cellImages xmlns="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing">
+  <cellImage><pic><nvPicPr><cNvPr id="1" name="img1"/></nvPicPr><blipFill><a:blip xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" r:embed="rId1" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></blipFill></pic></cellImage>
+  <cellImage><pic><nvPicPr><cNvPr id="2" name="img10"/></nvPicPr><blipFill><a:blip xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" r:embed="rId2" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></blipFill></pic></cellImage>
+  <cellImage><pic><nvPicPr><cNvPr id="3" name="img19"/></nvPicPr><blipFill><a:blip xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" r:embed="rId3" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></blipFill></pic></cellImage>
+  <cellImage><pic><nvPicPr><cNvPr id="4" name="img28"/></nvPicPr><blipFill><a:blip xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" r:embed="rId4" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></blipFill></pic></cellImage>
+</cellImages>"""
+        relationships_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image2.png"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image3.png"/>
+  <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image4.png"/>
+</Relationships>"""
+        temporary = self.root / "wps-dispimg.tmp.xlsx"
+        with zipfile.ZipFile(fixture, "r") as source, zipfile.ZipFile(temporary, "w") as target:
+            for entry in source.infolist():
+                target.writestr(entry, source.read(entry.filename))
+            target.writestr("xl/cellimages.xml", image_xml)
+            target.writestr("xl/_rels/cellimages.xml.rels", relationships_xml)
+            for index in range(1, 5):
+                target.writestr(f"xl/media/image{index}.png", self.image.read_bytes())
+        temporary.replace(fixture)
 
         items = extract_direct_replace_items(fixture, self.root / "direct-replace")
 
