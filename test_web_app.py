@@ -798,6 +798,10 @@ class AppStateTaskIsolationTests(unittest.TestCase):
             'start "" /b "%ROOT%ProductImageWorkflow.exe" --no-browser',
             launcher,
         )
+        self.assertIn(
+            'bootstrap.ps1" -Mode Ensure -NonInteractive -Root "%ROOT%"',
+            launcher,
+        )
 
     def test_app_state_restores_persisted_model_api_keys(self):
         web_app.SETTINGS_PATH.write_text(

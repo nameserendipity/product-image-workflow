@@ -23,16 +23,16 @@ if exist "%ROOT%ProductImageWorkflow.exe" (
     goto :failed
 )
 
-if not exist "%PYTHON%" (
-    echo Portable runtime not found.
-    echo Run install-dependencies.bat first or use the complete release package.
+if not exist "%ROOT%bootstrap.ps1" (
+    echo bootstrap.ps1 not found.
     pause
     exit /b 1
 )
 
-if not exist "%ROOT%local_settings.json" (
-    echo local_settings.json not found.
-    echo Copy local_settings.example.json to local_settings.json and configure the API keys.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%bootstrap.ps1" -Mode Ensure -NonInteractive -Root "%ROOT%"
+if errorlevel 1 (
+    echo.
+    echo Runtime bootstrap failed. Check the network and the error above.
     pause
     exit /b 1
 )
