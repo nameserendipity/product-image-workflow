@@ -23,4 +23,4 @@ jobs:
           npm run build
       - name: Verify generated frontend is committed
         shell: powershell
-        run: git diff --exit-code -- web
+        run: git diff --ignore-space-at-eol --exit-code -- web
