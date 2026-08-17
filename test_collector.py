@@ -1,6 +1,8 @@
+import base64
 import json
 import zipfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,11 +14,15 @@ from douyin_collector import download_douyin_package, douyin_checkbox_states, ma
 
 from store_insight_collector import (
     ASSET_LABELS,
+    CdpEndpointSelection,
+    CdpEndpointStatus,
     DOWNLOAD_COMPLETE_PATTERN,
     is_all_files_download_label,
     attach_sku_variants_to_images,
     build_manifest,
+    chrome_extension_id,
     close_project_browser_for_profile,
+    connect_browser,
     collect_store_insight_payload,
     collect_product_summary,
     empty_parameter_metadata,
@@ -26,9 +32,11 @@ from store_insight_collector import (
     find_waxiang_store_insight_extension,
     materialize,
     platform_challenge_text,
+    probe_cdp_endpoint,
     reload_item,
     RiskControlDetected,
     safe_extract,
+    select_cdp_endpoint,
     wait_for_store_insight_entry,
     wait_for_download_after_click,
     wait_for_platform_challenge,
@@ -681,6 +689,172 @@ class CollectorTests(unittest.TestCase):
     def test_download_complete_dialog_text_is_recognized(self):
         self.assertIsNotNone(DOWNLOAD_COMPLETE_PATTERN.search("5个文件下载完成"))
         self.assertIsNotNone(DOWNLOAD_COMPLETE_PATTERN.search("文件下载完成"))
+
+    def test_probe_cdp_endpoint_rejects_browser_from_another_profile(self):
+        with (
+            patch(
+                "store_insight_collector.cdp_owner_command_lines",
+                return_value=[
+                    r"waxiang.exe --remote-debugging-port=9223 --user-data-dir=D:\other-profile"
+                ],
+            ),
+            patch(
+                "store_insight_collector.fetch_cdp_targets",
+                return_value=[{"url": "chrome-extension://expected/background.html"}],
+            ),
+        ):
+            status = probe_cdp_endpoint(
+                "http://127.0.0.1:9223",
+                Path("D:/requested-profile"),
+                "expected",
+            )
+
+        self.assertFalse(status.reusable)
+        self.assertIn("profile", status.reason.lower())
+
+    def test_chrome_extension_id_prefers_manifest_key_over_folder_name(self):
+        with TemporaryDirectory() as directory:
+            extension_dir = Path(directory) / ("p" * 32) / "5.0.6_0"
+            extension_dir.mkdir(parents=True)
+            (extension_dir / "manifest.json").write_text(
+                json.dumps({"key": base64.b64encode(b"public-key").decode("ascii")}),
+                encoding="utf-8",
+            )
+
+            extension_id = chrome_extension_id(extension_dir)
+
+        self.assertEqual(extension_id, "edkegpbnaibnchabdaoccbakbnofjpjh")
+
+    def test_probe_cdp_endpoint_accepts_matching_profile_and_extension(self):
+        with (
+            patch(
+                "store_insight_collector.cdp_owner_command_lines",
+                return_value=[
+                    r"waxiang.exe --remote-debugging-port=9223 --user-data-dir=D:\requested-profile"
+                ],
+            ),
+            patch(
+                "store_insight_collector.fetch_cdp_targets",
+                return_value=[{"url": "chrome-extension://expected/background.html"}],
+            ),
+        ):
+            status = probe_cdp_endpoint(
+                "http://127.0.0.1:9223",
+                Path("D:/requested-profile"),
+                "expected",
+            )
+
+        self.assertTrue(status.reusable)
+
+    def test_probe_cdp_endpoint_accepts_extension_from_browser_command_line(self):
+        with (
+            patch(
+                "store_insight_collector.cdp_owner_command_lines",
+                return_value=[
+                    r"waxiang.exe --user-data-dir=D:\requested-profile "
+                    r"--load-extension=D:\Extensions\expected\5.0.6_0"
+                ],
+            ),
+            patch(
+                "store_insight_collector.fetch_cdp_targets",
+                return_value=[{"url": "https://hao.waxiang.com/"}],
+            ),
+        ):
+            status = probe_cdp_endpoint(
+                "http://127.0.0.1:9223",
+                Path("D:/requested-profile"),
+                "expected",
+            )
+
+        self.assertTrue(status.reusable)
+
+    def test_select_cdp_endpoint_reuses_matching_preferred_endpoint(self):
+        with patch(
+            "store_insight_collector.probe_cdp_endpoint",
+            return_value=CdpEndpointStatus(True, True, "ready"),
+        ):
+            selected = select_cdp_endpoint(
+                "http://127.0.0.1:9223",
+                Path("D:/profile"),
+                "expected",
+                True,
+            )
+
+        self.assertEqual(selected.url, "http://127.0.0.1:9223")
+        self.assertTrue(selected.reuse)
+
+    def test_select_cdp_endpoint_moves_wrong_profile_to_free_port(self):
+        with (
+            patch(
+                "store_insight_collector.probe_cdp_endpoint",
+                return_value=CdpEndpointStatus(True, False, "profile mismatch"),
+            ),
+            patch("store_insight_collector.find_free_loopback_port", return_value=43123),
+        ):
+            selected = select_cdp_endpoint(
+                "http://127.0.0.1:9223",
+                Path("D:/profile"),
+                "expected",
+                True,
+            )
+
+        self.assertEqual(selected.url, "http://127.0.0.1:43123")
+        self.assertFalse(selected.reuse)
+
+    def test_select_cdp_endpoint_keeps_free_preferred_port_for_launch(self):
+        with (
+            patch(
+                "store_insight_collector.probe_cdp_endpoint",
+                return_value=CdpEndpointStatus(False, False, "endpoint unavailable"),
+            ),
+            patch("store_insight_collector.is_loopback_port_free", return_value=True),
+        ):
+            selected = select_cdp_endpoint(
+                "http://127.0.0.1:9223",
+                Path("D:/profile"),
+                "expected",
+                False,
+            )
+
+        self.assertEqual(selected.url, "http://127.0.0.1:9223")
+        self.assertFalse(selected.reuse)
+
+    def test_connect_browser_launches_and_connects_to_selected_endpoint(self):
+        playwright = Mock()
+        browser = Mock()
+        playwright.chromium.connect_over_cdp.return_value = browser
+        args = SimpleNamespace(
+            reuse_existing_cdp=True,
+            cdp_url="http://127.0.0.1:9223",
+            auto_launch=True,
+            browser_executable="D:/Waxiang/waxiang.exe",
+            profile_dir="D:/profile",
+        )
+        selected = CdpEndpointSelection(
+            "http://127.0.0.1:43123",
+            False,
+            "profile mismatch",
+        )
+
+        with (
+            patch("store_insight_collector.find_browser_executable", return_value=args.browser_executable),
+            patch("store_insight_collector.find_waxiang_store_insight_extension", return_value=None),
+            patch("store_insight_collector.select_cdp_endpoint", return_value=selected),
+            patch("store_insight_collector.close_project_browser_for_profile", return_value=0),
+            patch(
+                "store_insight_collector.probe_cdp_endpoint",
+                return_value=CdpEndpointStatus(True, True, "ready"),
+            ),
+            patch("store_insight_collector.subprocess.Popen") as launch,
+        ):
+            result = connect_browser(playwright, args)
+
+        self.assertIs(result, browser)
+        launch.assert_called_once()
+        launch_args = launch.call_args.args[0]
+        self.assertIn("--remote-debugging-port=43123", launch_args)
+        self.assertIn("--remote-debugging-address=127.0.0.1", launch_args)
+        playwright.chromium.connect_over_cdp.assert_called_once_with("http://127.0.0.1:43123")
 
     def test_platform_challenge_uses_the_page_title_or_body(self):
         class Page:

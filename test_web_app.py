@@ -7,6 +7,19 @@ from unittest.mock import Mock, patch
 from zipfile import BadZipFile
 
 import web_app
+
+
+class GenerationErrorMessageTests(unittest.TestCase):
+    def test_generation_errors_name_active_vision_model(self):
+        handler = web_app.RequestHandler
+
+        unauthorized = handler._friendly_generation_error("HTTP 401: invalid token")
+        unavailable = handler._friendly_generation_error(
+            "model_not_found: gpt-5.6-sol is unavailable"
+        )
+
+        self.assertIn("gpt-5.6-sol", unauthorized)
+        self.assertIn("gpt-5.6-sol", unavailable)
 from agent_flow import AgentSession
 from batch_workflow import DirectLinkBatchItem, DirectReplaceBatchItem, save_batch_results
 from shared_library_client import CatalogPage, LockLease, SharedLibraryUnavailable, SharedProbe

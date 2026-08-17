@@ -910,6 +910,11 @@ class EcommerceWorkflowFidelityTests(unittest.TestCase):
                 "silhouette": "rectangular retail package with a flip-top lid",
                 "identity_invariants": ["single body", "white shell", "blue lid"],
                 "uncertainties": [],
+                "dispensing_state": {
+                    "closure_state": "closed",
+                    "outlet_exposed": False,
+                    "verified_material_effect_origin": "none",
+                },
             },
             "reference_visual_brief": {
                 "scene_summary": "bright commercial tabletop scene",
@@ -917,6 +922,9 @@ class EcommerceWorkflowFidelityTests(unittest.TestCase):
                 "lighting": "soft studio light",
                 "contains_replaceable_product": True,
                 "visible_product_unit_count": 1,
+                "primary_replaceable_product_unit_count": 1,
+                "gift_or_bonus_elements": [],
+                "physical_effects": [],
             },
             "compliance_risks": [
                 {"type": "competitor_brand", "location": "upper-left badge"}
@@ -929,16 +937,19 @@ class EcommerceWorkflowFidelityTests(unittest.TestCase):
                         "text": "单件主体",
                         "basis": "Image 1 visible evidence: one product package is visible",
                         "placement": "upper selling-point area",
+                        "required_visual_evidence": "one complete product package",
                     },
                     {
                         "text": "翻盖结构",
                         "basis": "Image 1 visible evidence: a flip-top lid is directly visible",
                         "placement": "left circular badge",
+                        "required_visual_evidence": "the visible flip-top lid",
                     },
                     {
                         "text": "清晰标签",
                         "basis": "Image 1 visible evidence: the label area is clearly visible",
                         "placement": "lower information strip",
+                        "required_visual_evidence": "the visible label area",
                     },
                 ],
                 "layout_instruction": "Follow Image 2's headline and selling-point hierarchy.",
@@ -1327,6 +1338,28 @@ class EcommerceWorkflowFidelityTests(unittest.TestCase):
             self.assertIn("Image 2 must never be used as factual evidence", instruction)
             self.assertIn("specific visible label, color, shape, component", instruction)
 
+    def test_own_product_analysis_retries_when_product_logic_contract_is_missing(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            product = root / "product.jpg"
+            reference = root / "reference.jpg"
+            product.write_bytes(b"product")
+            reference.write_bytes(b"reference")
+            analysis = json.loads(json.dumps(self.analysis))
+            del analysis["product_fingerprint"]["dispensing_state"]
+            del analysis["reference_visual_brief"]["primary_replaceable_product_unit_count"]
+            del analysis["reference_visual_brief"]["gift_or_bonus_elements"]
+            del analysis["reference_visual_brief"]["physical_effects"]
+            for selling_point in analysis["copy_plan"]["selling_points"]:
+                del selling_point["required_visual_evidence"]
+            response = {"choices": [{"message": {"content": json.dumps(analysis)}}]}
+
+            with patch("image_workflows._request_json", return_value=response) as request_json:
+                with self.assertRaisesRegex(RuntimeError, "dispensing_state"):
+                    VisionClient(self.settings).analyze(product, reference, "main")
+
+            self.assertEqual(request_json.call_count, 3)
+
     def test_own_product_runner_omits_identity_image_when_reference_has_no_product(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1342,11 +1375,14 @@ class EcommerceWorkflowFidelityTests(unittest.TestCase):
             with (
                 patch("image_workflows.VisionClient.analyze", return_value=analysis),
                 patch("image_workflows.ImageClient.generate", return_value=_test_png_bytes()) as generate,
+                patch("image_workflows.VisionClient.review_generated", create=True) as review,
             ):
                 record = runner._run_task(task, product, root / "generated")
 
             self.assertEqual(record["status"], "completed")
             self.assertEqual(generate.call_args.args[0], [reference.resolve()])
+            self.assertEqual(generate.call_count, 1)
+            review.assert_not_called()
             self.assertFalse(record["reference_contains_product"])
 
     def test_all_workflow_prompts_request_2k_quality_without_inventing_texture(self):
@@ -1543,6 +1579,57 @@ class EcommerceWorkflowFidelityTests(unittest.TestCase):
                 [product.resolve(), reference.resolve()],
                 record["generation_prompt"],
             )
+
+    def test_own_product_runner_generates_once_without_semantic_review(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            product = root / "product.png"
+            reference = root / "reference.jpg"
+            product.write_bytes(b"product")
+            reference.write_bytes(b"reference")
+            runner = WorkflowRunner(self.settings)
+
+            with (
+                patch("image_workflows.VisionClient.analyze", return_value=self.analysis),
+                patch("image_workflows.ImageClient.generate", return_value=_test_png_bytes()) as generate,
+                patch("image_workflows.VisionClient.review_generated", create=True) as review,
+            ):
+                record = runner._run_task(
+                    ImageTask("main", 1, reference), product, root / "generated"
+                )
+
+            self.assertEqual(record["status"], "completed")
+            self.assertTrue(Path(record["output_path"]).is_file())
+            self.assertEqual(generate.call_count, 1)
+            review.assert_not_called()
+            self.assertNotIn("quality_review", record)
+            self.assertNotIn("generation_attempts", record)
+            self.assertEqual(list((root / "generated" / "main").glob(".*.candidate-*.jpg")), [])
+
+    def test_competitor_reference_runner_does_not_use_own_product_quality_review(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            identity = root / "identity.jpg"
+            reference = root / "reference.jpg"
+            identity.write_bytes(b"identity")
+            reference.write_bytes(b"reference")
+            runner = WorkflowRunner(self.settings)
+
+            with (
+                patch("image_workflows.VisionClient.analyze", return_value=self.analysis),
+                patch("image_workflows.ImageClient.generate", return_value=_test_png_bytes()),
+                patch("image_workflows.VisionClient.review_generated", create=True) as review,
+            ):
+                record = runner._run_task(
+                    ImageTask("main", 1, reference),
+                    identity,
+                    root / "generated",
+                    generation_mode="competitor_reference",
+                )
+
+            self.assertEqual(record["status"], "completed")
+            self.assertNotIn("quality_review", record)
+            review.assert_not_called()
 
     def test_direct_reference_runner_builds_one_dossier_and_schedules_detail_plans(self):
         with TemporaryDirectory() as directory:

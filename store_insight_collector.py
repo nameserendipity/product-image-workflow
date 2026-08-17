@@ -7,18 +7,21 @@ It does not call a Store Insight API or bypass login/captcha challenges.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import io
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
 import urllib.request
 import zipfile
 from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -44,7 +47,11 @@ from platform_urls import (
     is_tmall_host,
     kuaishou_product_id,
 )
-from parameter_collector import collect_product_parameters, empty_parameter_metadata
+from parameter_collector import (
+    collect_product_parameters,
+    complete_parameter_metadata,
+    empty_parameter_metadata,
+)
 from same_item_collector import (
     click_first_visible_text,
     collect_product_video_url,
@@ -80,6 +87,20 @@ SKU_COLOR_VALUE_PATTERN = re.compile(
 
 class RiskControlDetected(RuntimeError):
     """Raised when Taobao explicitly rejects access and collection must stop."""
+
+
+@dataclass(frozen=True)
+class CdpEndpointStatus:
+    reachable: bool
+    reusable: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class CdpEndpointSelection:
+    url: str
+    reuse: bool
+    reason: str
 
 
 def configure_output() -> None:
@@ -198,6 +219,147 @@ def find_waxiang_store_insight_extension(executable: str, profile_dir: Path) -> 
     return extension_dir if (extension_dir / "manifest.json").is_file() else None
 
 
+def chrome_extension_id(extension_dir: Path | None) -> str:
+    if extension_dir is None:
+        return ""
+    extension_dir = Path(extension_dir)
+    manifest_path = extension_dir / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        public_key = str(manifest.get("key") or "").strip()
+        if public_key:
+            decoded = base64.b64decode(public_key, validate=True)
+            digest = hashlib.sha256(decoded).hexdigest()[:32]
+            return "".join(chr(ord("a") + int(value, 16)) for value in digest)
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    parent_name = extension_dir.parent.name.lower()
+    return parent_name if re.fullmatch(r"[a-p]{32}", parent_name) else ""
+
+
+def fetch_cdp_targets(cdp_url: str, timeout: float = 2.0) -> list[dict[str, Any]]:
+    endpoint = f"{cdp_url.rstrip('/')}/json/list"
+    with urllib.request.urlopen(endpoint, timeout=timeout) as response:
+        document = json.loads(response.read().decode("utf-8"))
+    if not isinstance(document, list):
+        raise RuntimeError("CDP target list is not an array")
+    return [target for target in document if isinstance(target, dict)]
+
+
+def cdp_owner_command_lines(cdp_url: str) -> list[str]:
+    if os.name != "nt":
+        return []
+    parsed = urlparse(cdp_url)
+    port = parsed.port
+    if port is None:
+        return []
+    environment = os.environ.copy()
+    environment["PRODUCT_IMAGE_CDP_PORT"] = str(port)
+    environment["PRODUCT_IMAGE_CDP_HOST"] = parsed.hostname or "127.0.0.1"
+    script = """
+$port = [int][Environment]::GetEnvironmentVariable('PRODUCT_IMAGE_CDP_PORT')
+$hostName = [Environment]::GetEnvironmentVariable('PRODUCT_IMAGE_CDP_HOST')
+Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+  Where-Object {
+    $hostName -eq 'localhost' -or
+    $_.LocalAddress -eq $hostName -or
+    ($hostName -eq '127.0.0.1' -and $_.LocalAddress -eq '0.0.0.0')
+  } |
+  ForEach-Object {
+    Get-CimInstance Win32_Process -Filter "ProcessId = $($_.OwningProcess)" -ErrorAction SilentlyContinue
+  } |
+  Where-Object { $_.CommandLine } |
+  Select-Object -ExpandProperty CommandLine
+"""
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def probe_cdp_endpoint(
+    cdp_url: str,
+    profile_dir: Path,
+    expected_extension_id: str = "",
+) -> CdpEndpointStatus:
+    try:
+        targets = fetch_cdp_targets(cdp_url)
+    except Exception as error:
+        return CdpEndpointStatus(False, False, f"endpoint unavailable: {error}")
+
+    command_lines = cdp_owner_command_lines(cdp_url)
+    normalized_profile = str(Path(profile_dir).expanduser().resolve()).replace("/", "\\").casefold()
+    if os.name == "nt" and not command_lines:
+        return CdpEndpointStatus(True, False, "profile owner not found")
+    if command_lines and not any(
+        normalized_profile in command_line.replace("/", "\\").casefold()
+        for command_line in command_lines
+    ):
+        return CdpEndpointStatus(True, False, "profile mismatch")
+
+    expected_extension_id = expected_extension_id.strip().lower()
+    if expected_extension_id:
+        prefix = f"chrome-extension://{expected_extension_id}/"
+        target_matches = any(
+            str(target.get("url") or "").lower().startswith(prefix)
+            for target in targets
+        )
+        command_matches = any(
+            expected_extension_id in command_line.casefold()
+            for command_line in command_lines
+        )
+        if not target_matches and not command_matches:
+            return CdpEndpointStatus(True, False, "Store Insight extension target not found")
+    return CdpEndpointStatus(True, True, "ready")
+
+
+def is_loopback_port_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        try:
+            listener.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def find_free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def select_cdp_endpoint(
+    preferred_url: str,
+    profile_dir: Path,
+    expected_extension_id: str,
+    reuse_existing: bool,
+) -> CdpEndpointSelection:
+    parsed = urlparse(preferred_url)
+    preferred_port = parsed.port or 9223
+    preferred_url = f"http://127.0.0.1:{preferred_port}"
+    status = probe_cdp_endpoint(preferred_url, profile_dir, expected_extension_id)
+    if reuse_existing and status.reusable:
+        return CdpEndpointSelection(preferred_url, True, status.reason)
+    if status.reusable or (not status.reachable and is_loopback_port_free(preferred_port)):
+        return CdpEndpointSelection(preferred_url, False, status.reason)
+    port = find_free_loopback_port()
+    return CdpEndpointSelection(
+        f"http://127.0.0.1:{port}",
+        False,
+        status.reason or "preferred CDP endpoint is occupied",
+    )
+
+
 def close_project_browser_for_profile(profile_dir: Path) -> int:
     if os.name != "nt":
         return 0
@@ -232,37 +394,50 @@ Get-CimInstance Win32_Process | Where-Object {
 
 
 def connect_browser(playwright: Playwright, args: argparse.Namespace) -> Browser:
+    executable = find_browser_executable(args.browser_executable)
+    profile_dir = Path(args.profile_dir).expanduser().resolve()
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    extension_dir = find_waxiang_store_insight_extension(executable, profile_dir)
+    expected_extension_id = chrome_extension_id(extension_dir)
+    selection = select_cdp_endpoint(
+        args.cdp_url,
+        profile_dir,
+        expected_extension_id,
+        args.reuse_existing_cdp,
+    )
+    if selection.url != args.cdp_url:
+        print(
+            f"[collector] CDP endpoint conflict ({selection.reason}); using {selection.url}.",
+            flush=True,
+        )
     first_error: Exception | None = None
-    if args.reuse_existing_cdp:
+    if selection.reuse:
         try:
-            browser = playwright.chromium.connect_over_cdp(args.cdp_url)
+            browser = playwright.chromium.connect_over_cdp(selection.url)
             print("[collector] 已连接现有采集浏览器。", flush=True)
             return browser
         except Exception as error:
             first_error = error
     if not args.auto_launch:
         raise RuntimeError(
-            f"Could not connect to {args.cdp_url}. Start Chrome/Edge with remote debugging "
+            f"Could not connect to {selection.url}. Start Chrome/Edge with remote debugging "
             "or pass --auto-launch."
         ) from first_error
 
-    executable = find_browser_executable(args.browser_executable)
-    profile_dir = Path(args.profile_dir).expanduser().resolve()
-    profile_dir.mkdir(parents=True, exist_ok=True)
     closed_count = close_project_browser_for_profile(profile_dir)
     if closed_count:
         print("[collector] 已关闭遗留的采集浏览器窗口，正在使用同一登录档案重新启动。", flush=True)
         time.sleep(1)
-    parsed_cdp_url = urlparse(args.cdp_url)
+    parsed_cdp_url = urlparse(selection.url)
     cdp_port = parsed_cdp_url.port or 9223
     launch_args = [
         executable,
         f"--remote-debugging-port={cdp_port}",
+        "--remote-debugging-address=127.0.0.1",
         f"--user-data-dir={profile_dir}",
         "--no-first-run",
         "--no-default-browser-check",
     ]
-    extension_dir = find_waxiang_store_insight_extension(executable, profile_dir)
     if extension_dir:
         launch_args.append(f"--load-extension={extension_dir}")
         print("[collector] 已加载挖象浏览器内置店透视扩展。", flush=True)
@@ -274,14 +449,24 @@ def connect_browser(playwright: Playwright, args: argparse.Namespace) -> Browser
     )
     deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
+        status = probe_cdp_endpoint(
+            selection.url,
+            profile_dir,
+            expected_extension_id,
+        )
+        if not status.reusable:
+            time.sleep(0.5)
+            continue
         try:
-            browser = playwright.chromium.connect_over_cdp(args.cdp_url)
+            browser = playwright.chromium.connect_over_cdp(selection.url)
             print("[collector] 采集浏览器已启动。", flush=True)
             return browser
-        except Exception:
+        except Exception as error:
+            first_error = error
             time.sleep(0.5)
     raise RuntimeError(
-        "Browser did not expose the CDP endpoint. Verify the selected browser can start with remote debugging."
+        f"Browser did not expose the validated CDP endpoint {selection.url} for profile "
+        f"{profile_dir}. Verify the selected browser can start with remote debugging."
     ) from first_error
 
 
@@ -1282,10 +1467,24 @@ def collect_kuaishou_payload(
         if asset_type in selected_types and any(record.get("type") == asset_type for record in records)
     ]
     video_record = next((record for record in records if record.get("type") == "video"), None)
+    parameters = [
+        item
+        for item in extracted.get("productParameters") or []
+        if isinstance(item, dict)
+    ]
+    parameter_metadata = (
+        complete_parameter_metadata(product_id, parameters)
+        if parameters
+        else empty_parameter_metadata(
+            product_id,
+            "not_found",
+            "快手公开页面未提供稳定的结构化商品参数",
+        )
+    )
     metadata = {
         "product_title": str(extracted.get("title") or page_title or "").strip(),
         "current_price": str(extracted.get("price") or "").strip(),
-        **empty_parameter_metadata(product_id, "not_found", "快手公开页面未提供稳定的结构化商品参数"),
+        **parameter_metadata,
         **empty_sku_metadata(),
         "sku_metadata_error": "快手公开页面未提供稳定 SKU 图片映射；可使用表格 SKU 截图补充",
         "main_video_requested": True,

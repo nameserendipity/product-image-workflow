@@ -35,6 +35,7 @@ from image_workflows import (
     resolve_identity_image,
     materialize_sku_screenshot_references,
 )
+from kuaishou_parameters import ensure_kuaishou_product_parameters
 from oss_uploader import OssUploader, upload_generation_records, upload_video_if_needed
 from platform_urls import (
     TAOBAO_SHORT_HOSTS,
@@ -1147,7 +1148,9 @@ def merge_manual_sku_metadata(
 ) -> dict[str, Any]:
     if not item.manual_skus:
         return document
-    if document.get("sku_variants"):
+    if document.get("sku_variants") and not (
+        isinstance(item, DirectLinkBatchItem) and item.sku_screenshot
+    ):
         return document
     updated = dict(document)
     variants: list[dict[str, Any]] = []
@@ -1643,7 +1646,12 @@ def export_product_workbook(
     detail_completed = sum(record.get("status") == "completed" for record in generated["detail"])
     sku_completed = sum(record.get("generation_status") == "生成成功" for record in sku_rows)
     parameters = [
-        {"type": "商品参数", "name": row.get("name", ""), "value": row.get("value", ""), "handling": "采集原值"}
+        {
+            "type": "商品参数",
+            "name": row.get("name", ""),
+            "value": row.get("value", ""),
+            "handling": row.get("handling") or "采集原值",
+        }
         for row in source.get("product_parameters", [])
     ]
     video_url = str(source.get("main_video_url") or "")
@@ -2543,6 +2551,18 @@ class BatchRunner:
                             message=str(record["oss_upload_error"]),
                         )
                 self.workflow_runner = None
+                if (
+                    isinstance(item, (DirectLinkBatchItem, DirectReplaceBatchItem))
+                    and item.platform == "kuaishou"
+                ):
+                    source_document = ensure_kuaishou_product_parameters(
+                        source_document,
+                        item_root / "generated" / "product-dossier.json",
+                    )
+                    source_manifest.write_text(
+                        json.dumps(source_document, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
                 generated_count, failed_count, missing_categories = summarize_generation_result(
                     generation_records,
                     available_types,

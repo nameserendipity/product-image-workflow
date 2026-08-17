@@ -24,14 +24,45 @@ def _test_png_bytes(size: tuple[int, int] = (32, 32)) -> bytes:
     return buffer.getvalue()
 
 
+class ApiSettingsTests(unittest.TestCase):
+    def test_api_settings_defaults_to_gpt_5_6_sol(self):
+        settings = image_workflows.ApiSettings(
+            base_url="https://api.example",
+            vision_api_key="vision-key",
+            image_api_key="image-key",
+        )
+
+        self.assertEqual(settings.vision_model, "gpt-5.6-sol")
+
+
 class PromptCompositionTests(unittest.TestCase):
     @staticmethod
     def _analysis(contains_product: bool) -> dict:
         return {
-            "product_fingerprint": {"visible_category": "test product"},
+            "product_fingerprint": {
+                "visible_category": "test product",
+                "dispensing_state": {
+                    "closure_state": "closed",
+                    "outlet_exposed": False,
+                    "verified_material_effect_origin": "none",
+                },
+            },
             "reference_visual_brief": {
                 "contains_replaceable_product": contains_product,
                 "composition": "reference composition",
+                "primary_replaceable_product_unit_count": 1 if contains_product else 0,
+                "gift_or_bonus_elements": [
+                    {
+                        "description": "sample sachet",
+                        "action": "remove",
+                    }
+                ],
+                "physical_effects": [
+                    {
+                        "description": "detached cream smear",
+                        "origin_visible": False,
+                    }
+                ],
             },
             "compliance_risks": [],
             "copy_plan": {
@@ -42,12 +73,30 @@ class PromptCompositionTests(unittest.TestCase):
                         "text": "SELLING POINT FROM ANALYSIS",
                         "basis": "Image 1 visible evidence: test",
                         "placement": "top",
+                        "required_visual_evidence": "the closed product body",
                     }
                 ],
                 "layout_instruction": "Preserve the reference layout",
             },
             "generation_prompt": "ADD THE USER PRODUCT NOW",
         }
+
+    def test_own_product_prompt_enforces_primary_gift_copy_and_physical_rules(self):
+        analysis = self._analysis(True)
+        analysis["reference_visual_brief"]["primary_replaceable_product_unit_count"] = 2
+
+        prompt = image_workflows.compose_generation_prompt(
+            analysis,
+            "main",
+            "own_product",
+        )
+
+        self.assertIn("EXACT PRIMARY PRODUCT UNIT COUNT: 2", prompt)
+        self.assertIn("Remove every gift, sample, bonus product", prompt)
+        self.assertIn("required_visual_evidence", prompt)
+        self.assertIn("the closed product body", prompt)
+        self.assertIn("no exposed outlet", prompt)
+        self.assertIn("must not touch or emerge from the product", prompt)
 
     def test_product_free_reference_omits_conflicting_product_insertion_instructions(self):
         prompt = image_workflows.compose_generation_prompt(
@@ -459,8 +508,27 @@ class ImageRequestRetryTests(unittest.TestCase):
         }
         valid = dict(
             invalid,
-            product_fingerprint={"category": "商品"},
-            reference_visual_brief={"contains_replaceable_product": True},
+            product_fingerprint={
+                "category": "商品",
+                "dispensing_state": {
+                    "closure_state": "closed",
+                    "outlet_exposed": False,
+                    "verified_material_effect_origin": "none",
+                },
+            },
+            reference_visual_brief={
+                "contains_replaceable_product": True,
+                "primary_replaceable_product_unit_count": 1,
+                "gift_or_bonus_elements": [],
+                "physical_effects": [],
+            },
+            copy_plan={
+                **invalid["copy_plan"],
+                "selling_points": [{
+                    **invalid["copy_plan"]["selling_points"][0],
+                    "required_visual_evidence": "完整商品主体",
+                }],
+            },
         )
         responses = [
             {"choices": [{"message": {"content": json.dumps(invalid, ensure_ascii=False)}}]},
@@ -476,7 +544,7 @@ class ImageRequestRetryTests(unittest.TestCase):
                 image_workflows.ApiSettings("https://api.example", "vision-key", "image-key")
             ).analyze(Mock(), Mock(), "main")
 
-        self.assertEqual(result["product_fingerprint"], {"category": "商品"})
+        self.assertEqual(result["product_fingerprint"]["category"], "商品")
         self.assertEqual(request.call_count, 3)
 
     def test_image_request_uses_high_quality_with_compatible_auto_size(self):

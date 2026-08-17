@@ -190,7 +190,7 @@ function writeParameterSheet(sheet, parameters) {
   sheet.getRange(`A1:D${Math.max(rows.length, 1)}`).values = rows;
   const widths = { A: 16, B: 30, C: 72, D: 22 };
   applyTableStyle(sheet, rows.length, "D", widths);
-  applyDynamicRowHeights(sheet, rows, widths);
+  applyDynamicRowHeights(sheet, rows, widths, { maximum: 240 });
 }
 
 function writeTitleSheet(sheet, title) {

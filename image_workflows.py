@@ -227,7 +227,7 @@ class ApiSettings:
     base_url: str
     vision_api_key: str
     image_api_key: str
-    vision_model: str = "gpt-5.5"
+    vision_model: str = "gpt-5.6-sol"
     image_model: str = "gpt-image-2"
 
     def endpoint(self, path: str) -> str:
@@ -683,13 +683,64 @@ def _validate_analysis(analysis: dict[str, Any]) -> None:
 
 
 def _validate_own_product_analysis(analysis: dict[str, Any], category: str = "") -> None:
-    presence = analysis.get("reference_visual_brief", {}).get("contains_replaceable_product")
+    fingerprint = analysis.get("product_fingerprint", {})
+    dispensing_state = fingerprint.get("dispensing_state")
+    if not isinstance(dispensing_state, dict):
+        raise RuntimeError("Vision response product_fingerprint.dispensing_state must be an object")
+    if not isinstance(dispensing_state.get("closure_state"), str) or not dispensing_state["closure_state"].strip():
+        raise RuntimeError("Vision response product_fingerprint.dispensing_state.closure_state must be a non-empty string")
+    if not isinstance(dispensing_state.get("outlet_exposed"), bool):
+        raise RuntimeError("Vision response product_fingerprint.dispensing_state.outlet_exposed must be a boolean")
+    if not isinstance(dispensing_state.get("verified_material_effect_origin"), str):
+        raise RuntimeError(
+            "Vision response product_fingerprint.dispensing_state.verified_material_effect_origin must be a string"
+        )
+
+    visual_brief = analysis.get("reference_visual_brief", {})
+    presence = visual_brief.get("contains_replaceable_product")
     if not isinstance(presence, bool):
         raise RuntimeError(
             "Vision response reference_visual_brief.contains_replaceable_product must be a boolean"
         )
+    primary_unit_count = visual_brief.get("primary_replaceable_product_unit_count")
+    expected_minimum = 1 if presence else 0
+    expected_maximum = 20 if presence else 0
+    if (
+        isinstance(primary_unit_count, bool)
+        or not isinstance(primary_unit_count, int)
+        or not expected_minimum <= primary_unit_count <= expected_maximum
+    ):
+        raise RuntimeError(
+            "Vision response reference_visual_brief.primary_replaceable_product_unit_count must match the visible primary-product count"
+        )
+    gifts = visual_brief.get("gift_or_bonus_elements")
+    if not isinstance(gifts, list):
+        raise RuntimeError("Vision response reference_visual_brief.gift_or_bonus_elements must be an array")
+    for gift in gifts:
+        if (
+            not isinstance(gift, dict)
+            or not isinstance(gift.get("description"), str)
+            or not gift["description"].strip()
+            or gift.get("action") != "remove"
+        ):
+            raise RuntimeError(
+                "Each gift_or_bonus_elements item must contain a non-empty description and action 'remove'"
+            )
+    physical_effects = visual_brief.get("physical_effects")
+    if not isinstance(physical_effects, list):
+        raise RuntimeError("Vision response reference_visual_brief.physical_effects must be an array")
+    for effect in physical_effects:
+        if (
+            not isinstance(effect, dict)
+            or not isinstance(effect.get("description"), str)
+            or not effect["description"].strip()
+            or not isinstance(effect.get("origin_visible"), bool)
+        ):
+            raise RuntimeError(
+                "Each physical_effects item must contain a non-empty description and boolean origin_visible"
+            )
     if category == "sku" and presence:
-        unit_count = analysis["reference_visual_brief"].get("visible_product_unit_count")
+        unit_count = visual_brief.get("visible_product_unit_count")
         if isinstance(unit_count, bool) or not isinstance(unit_count, int) or not 1 <= unit_count <= 20:
             raise RuntimeError(
                 "Vision response reference_visual_brief.visible_product_unit_count must be an integer between 1 and 20 for a SKU reference containing a product"
@@ -699,6 +750,11 @@ def _validate_own_product_analysis(analysis: dict[str, Any], category: str = "")
         if not basis.startswith("Image 1 visible evidence:"):
             raise RuntimeError(
                 "Each own-product selling point basis must start with 'Image 1 visible evidence:'"
+            )
+        required_visual_evidence = selling_point.get("required_visual_evidence")
+        if not isinstance(required_visual_evidence, str) or not required_visual_evidence.strip():
+            raise RuntimeError(
+                "Each own-product selling point must contain non-empty required_visual_evidence"
             )
 
 
@@ -1000,6 +1056,9 @@ Output one finished ecommerce image for manual review. The result should look mo
     if generation_mode != "own_product":
         raise ValueError(f"Unknown generation mode: {generation_mode}")
     contains_product = analysis["reference_visual_brief"].get("contains_replaceable_product", True)
+    primary_unit_count = analysis["reference_visual_brief"].get(
+        "primary_replaceable_product_unit_count"
+    )
     sku_unit_count = (
         analysis["reference_visual_brief"].get("visible_product_unit_count")
         if category == "sku"
@@ -1078,6 +1137,27 @@ The product-presence gate overrides every other instruction and every piece of a
         if category == "main" and composition_role and contains_product
         else ""
     )
+    product_logic_directive = (
+        "Primary-product, gift, copy-evidence, and physical-causality rules (highest priority):\n"
+        f"- EXACT PRIMARY PRODUCT UNIT COUNT: {primary_unit_count}. For main and detail images, render exactly "
+        f"{primary_unit_count} full-size primary Image 1 product unit(s), matching Image 2's primary-product "
+        "placement and dominance. Do not count gifts, samples, bonus products, cartons, material effects, or props "
+        "as primary product units.\n"
+        "- Remove every gift, sample, bonus product, buy-gift promise, and its dedicated promotional region from "
+        "Image 2. Reconstruct the removed area from the surrounding background. Do not shrink the primary Image 1 "
+        "product to occupy a gift or sample position.\n"
+        "- Treat any packaging visible in Image 1 as a separate identity component, not as another product unit or "
+        "gift. Every selling point's required_visual_evidence must be clearly visible on the final canvas. If the "
+        "planned copy mentions an outer carton, render that matching Image 1 carton clearly; otherwise do not render "
+        "that copy.\n"
+        "- If product_fingerprint.dispensing_state says there is no exposed outlet, cream, liquid, gel, powder, or "
+        "other product material must not touch or emerge from the product body, seam, cap, or side. A reference "
+        "material effect may remain only as a detached prop with clear visible separation from the product.\n"
+        "- If an outlet is exposed, product material may originate only from that verified outlet and must follow "
+        "physically plausible contact and gravity."
+        if category in {"main", "detail"} and contains_product
+        else ""
+    )
     return f"""Use case: ecommerce product image editing
 Workflow: {WORKFLOW_PROFILES[category]['label']}
 Workflow objective: {workflow_instruction(category)}
@@ -1105,6 +1185,8 @@ For main and detail tasks, product naming, title copy, and selling points must b
 
 Main-image composition plan:
 {composition_rule}
+
+{product_logic_directive}
 
 Ecommerce title and selling-point layout:
 {copy_layout}
@@ -1313,18 +1395,27 @@ Observations:
             "product_fingerprint must be an object describing visible category, silhouette, proportions, "
             "component count and positions, connections, orientation, openings or controls, colors, materials, "
             "reflections, textures, labels and marks, packaging, real accessories, identity_invariants, and "
-            "uncertainties. Do not guess hidden specifications or facts. The analysis must remain "
+            "uncertainties. It must also contain dispensing_state with non-empty closure_state, boolean "
+            "outlet_exposed, and string verified_material_effect_origin. Describe only an origin visibly verified "
+            "in Image 1; use 'none' when no origin is visible. Do not guess hidden specifications or facts. The analysis must remain "
             "category-neutral and reusable for any product category; do not assume a fixed category from the "
             "reference image or from previous tasks. "
             "reference_visual_brief must be an object describing scene_summary, composition, framing, camera, "
             "subject placement and scale, lighting, color_palette, background, ordinary props, atmosphere, "
-            "text_regions, visual hierarchy, contains_replaceable_product, and visible_product_unit_count. "
+            "text_regions, visual hierarchy, contains_replaceable_product, visible_product_unit_count, "
+            "primary_replaceable_product_unit_count, gift_or_bonus_elements, and physical_effects. "
             "visible_product_unit_count must be an integer equal to the exact number of replaceable product units "
             "visibly present in Image 2; use 0 when contains_replaceable_product is false. contains_replaceable_product must "
             "be true only when Image 2 visibly contains a real competitor product subject that should be replaced; "
             "it must be false for text-only panels, parameter tables, diagrams without a product, background-only "
             "images, decorative transitions, and lifestyle scenes without a visible product. Do not infer that a "
             "product exists merely because the image belongs to an ecommerce listing. "
+            "primary_replaceable_product_unit_count must count only full-size primary competitor products, excluding "
+            "gifts, samples, bonus products, cartons, material effects, and props; use 0 when contains_replaceable_product "
+            "is false. gift_or_bonus_elements must be an array of objects with description and action; action must "
+            "always be 'remove' because no user-owned gift identity was supplied. physical_effects must be an array "
+            "of objects with description and boolean origin_visible for every cream, liquid, gel, powder, vapor, "
+            "smear, or splash visible in Image 2. "
             "compliance_risks must inspect both Image 1 and Image 2 and be an array of objects with "
             "source_image, type, location, and removal_instruction for "
             "competitor brands, logos, store names, watermarks, proprietary text, patents, certifications, "
@@ -1338,7 +1429,9 @@ Observations:
             "headline is mandatory Simplified Chinese ecommerce copy of about 6 to 16 Chinese characters. "
             "subheadline is a Simplified Chinese string and may be empty only when a second-level line would make "
             "the layout crowded. selling_points must contain one to three objects, each with exact Simplified "
-            "Chinese text, basis, and placement. Every headline and selling point must be supported only by clearly "
+            "Chinese text, basis, placement, and required_visual_evidence. required_visual_evidence must name the "
+            "specific product, package, carton, label, component, or other element that must remain clearly visible "
+            "on the final canvas for the selling point to be truthful. Every headline and selling point must be supported only by clearly "
             "visible Image 1 label information or directly observable Image 1 structure. Image 2 must never be used "
             "as factual evidence for a selling point, even when its wording appears ordinary or plausible. Every "
             "selling-point basis must start with the exact prefix 'Image 1 visible evidence:' followed by the specific "
@@ -2236,8 +2329,6 @@ class WorkflowRunner:
                     task.composition_role,
                     task.manual_sku,
                 )
-            stage = "调用 gpt-image-2 生图"
-            self._emit(task, "generating", stage_label=stage)
             if generation_mode == "competitor_reference":
                 generation_images = ordered_generation_images(
                     task.source_path, task.supporting_path, product_image
@@ -2246,16 +2337,15 @@ class WorkflowRunner:
                 generation_images = [task.source_path.resolve()]
             else:
                 generation_images = ordered_generation_images(product_image, None, task.source_path)
-            image_bytes = ImageClient(self.settings).generate(
-                generation_images,
-                prompt,
-            )
-            if self.cancel_event.is_set():
-                self._emit(task, "cancelled")
-                return {"category": task.category, "ordinal": task.ordinal, "status": "cancelled"}
             target_dir = output_root / task.category
             target_dir.mkdir(parents=True, exist_ok=True)
             output_path = target_dir / f"{task.ordinal:03d}.jpg"
+            stage = "调用 gpt-image-2 生图"
+            self._emit(task, "generating", stage_label=stage)
+            image_bytes = ImageClient(self.settings).generate(generation_images, prompt)
+            if self.cancel_event.is_set():
+                self._emit(task, "cancelled")
+                return {"category": task.category, "ordinal": task.ordinal, "status": "cancelled"}
             _write_generated_image(image_bytes, output_path)
             record = {
                 "category": task.category,

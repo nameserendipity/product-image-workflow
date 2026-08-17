@@ -2865,9 +2865,9 @@ class RequestHandler(SimpleHTTPRequestHandler):
     def _friendly_generation_error(message: str) -> str:
         lower = message.lower()
         if "http 401" in lower and "invalid token" in lower:
-            return "视觉 API Key 无效，请更换具备 gpt-5.5 视觉权限的 Key。"
-        if "model_not_found" in lower and "gpt-5.5" in lower:
-            return "当前中转站没有 gpt-5.5 视觉通道，请切换到支持该模型的线路。"
+            return "视觉 API Key 无效，请更换具备 gpt-5.6-sol 视觉权限的 Key。"
+        if "model_not_found" in lower and "gpt-5.6-sol" in lower:
+            return "当前中转站没有 gpt-5.6-sol 视觉通道，请切换到支持该模型的线路。"
         return message
 
     def _json_body(self) -> dict:

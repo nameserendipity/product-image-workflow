@@ -119,6 +119,10 @@ class KuaishouIntegrationTests(unittest.TestCase):
                     "https://p4-ec.ecukwai.com/ITEM_DETAIL_IMAGE-current-1.jpg",
                 ],
                 "video": {"playUrl": "https://v4-ec.ecukwai.com/product.mp4"},
+                "goodsParams": [
+                    {"attrName": "净含量", "attrValue": "800ml"},
+                    {"attrName": "包装形式", "attrValue": "泵瓶"},
+                ],
             }
         }
         page = Mock()
@@ -156,6 +160,25 @@ class KuaishouIntegrationTests(unittest.TestCase):
 
         self.assertEqual([record["type"] for record in records], ["main", "detail", "video"])
         self.assertEqual(metadata["product_title"], "心相印茶语丝享餐巾纸")
+        self.assertEqual(metadata["parameter_status"], "complete")
+        self.assertEqual(metadata["parameter_source_product_id"], "26065497098904")
+        self.assertEqual(
+            metadata["product_parameters"],
+            [
+                {
+                    "name": "净含量",
+                    "value": "800ml",
+                    "source": "platform_api",
+                    "handling": "快手平台原值",
+                },
+                {
+                    "name": "包装形式",
+                    "value": "泵瓶",
+                    "source": "platform_api",
+                    "handling": "快手平台原值",
+                },
+            ],
+        )
         self.assertEqual(metadata["sku_metadata_status"], "not_found")
         self.assertEqual(metadata["sku_variants"], [])
         self.assertEqual(metadata["missing_asset_types"], ["sku"])

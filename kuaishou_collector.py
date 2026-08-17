@@ -18,6 +18,18 @@ TRUSTED_ASSET_DOMAINS = ("ecukwai.com",)
 MAX_ASSET_BYTES = 100 * 1024 * 1024
 IDENTITY_KEYS = {"goodsid", "productid", "itemid"}
 EXCLUDED_PRODUCT_SUBTREES = ("sku", "spec", "variant", "recommend", "advert", "similar")
+PROXY_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
+PARAMETER_CONTAINER_KEYS = {
+    "productparameters",
+    "goodsparams",
+    "attributes",
+    "specifications",
+    "propertylist",
+    "paramlist",
+    "attributelist",
+}
+PARAMETER_NAME_KEYS = ("name", "attrname", "propertyname", "specname", "key", "label")
+PARAMETER_VALUE_KEYS = ("value", "attrvalue", "propertyvalue", "specvalue", "text")
 
 
 @dataclass(frozen=True)
@@ -45,8 +57,10 @@ def is_safe_asset_url(url: str, resolve_dns: bool = False) -> bool:
         addresses = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
     except OSError:
         return False
-    resolved = {entry[4][0] for entry in addresses if entry[4]}
-    return bool(resolved) and all(ipaddress.ip_address(address).is_global for address in resolved)
+    resolved = {ipaddress.ip_address(entry[4][0]) for entry in addresses if entry[4]}
+    return bool(resolved) and all(
+        address.is_global or address in PROXY_FAKE_IP_NETWORK for address in resolved
+    )
 
 
 def classify_image_url(url: str) -> str | None:
@@ -93,6 +107,134 @@ def _price_value(value: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _contains_product_identity(value: object, product_id: str) -> bool:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized_key = str(key).replace("_", "").replace("-", "").lower()
+            if normalized_key in IDENTITY_KEYS and isinstance(child, (str, int)):
+                if str(child).strip() == product_id:
+                    return True
+            if _contains_product_identity(child, product_id):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_product_identity(child, product_id) for child in value)
+    return False
+
+
+def _normalized_key(value: object) -> str:
+    return str(value).replace("_", "").replace("-", "").lower()
+
+
+def _parameter_text(value: object) -> str:
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, (str, int, float)):
+        return re.sub(r"\s+", " ", str(value)).strip(" ：:")
+    if isinstance(value, list) and all(
+        isinstance(item, (str, int, float)) and not isinstance(item, bool)
+        for item in value
+    ):
+        return "/".join(filter(None, (_parameter_text(item) for item in value)))
+    return ""
+
+
+def _parameter_rows(value: object) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+
+    def visit(candidate: object) -> None:
+        if isinstance(candidate, list):
+            for item in candidate:
+                visit(item)
+            return
+        if not isinstance(candidate, dict):
+            return
+        normalized = {_normalized_key(key): child for key, child in candidate.items()}
+        name = next(
+            (_parameter_text(normalized.get(key)) for key in PARAMETER_NAME_KEYS if _parameter_text(normalized.get(key))),
+            "",
+        )
+        content = next(
+            (_parameter_text(normalized.get(key)) for key in PARAMETER_VALUE_KEYS if _parameter_text(normalized.get(key))),
+            "",
+        )
+        if (
+            name
+            and content
+            and len(name) <= 50
+            and len(content) <= 500
+            and not content.lower().startswith(("http://", "https://"))
+        ):
+            rows.append(
+                {
+                    "name": name,
+                    "value": content,
+                    "source": "platform_api",
+                    "handling": "快手平台原值",
+                }
+            )
+        for child in candidate.values():
+            if isinstance(child, (dict, list)):
+                visit(child)
+
+    visit(value)
+    deduplicated: list[dict[str, str]] = []
+    seen_names: set[str] = set()
+    for row in rows:
+        if row["name"] in seen_names:
+            continue
+        seen_names.add(row["name"])
+        deduplicated.append(row)
+    return deduplicated
+
+
+def _is_parameter_container(key: str) -> bool:
+    return key in PARAMETER_CONTAINER_KEYS
+
+
+def _componentized_parameter_sources(payload: object, product_id: str) -> list[object] | None:
+    if not product_id or not isinstance(payload, dict):
+        return None
+    envelope = payload.get("data")
+    components = envelope.get("data") if isinstance(envelope, dict) else None
+    if not isinstance(components, dict):
+        return None
+    identity_components = (
+        components.get("idToolbar"),
+        components.get("idBottomBar"),
+        components.get("idFullList"),
+    )
+    if not any(_contains_product_identity(component, product_id) for component in identity_components):
+        return []
+    return [
+        component
+        for name, component in components.items()
+        if any(marker in _normalized_key(name) for marker in ("param", "spec", "attribute"))
+    ]
+
+
+def _componentized_media_sources(payload: object, product_id: str) -> list[object] | None:
+    if not product_id or not isinstance(payload, dict):
+        return None
+    envelope = payload.get("data")
+    components = envelope.get("data") if isinstance(envelope, dict) else None
+    if not isinstance(components, dict):
+        return None
+
+    identity_components = (
+        components.get("idToolbar"),
+        components.get("idBottomBar"),
+        components.get("idFullList"),
+    )
+    if not any(_contains_product_identity(component, product_id) for component in identity_components):
+        return []
+
+    return [
+        component
+        for name, component in components.items()
+        if name == "idMainPic" or name.startswith("idDecorate___detailImage")
+    ]
+
+
 def extract_product_payload(
     payload: object,
     base_url: str = "",
@@ -101,6 +243,7 @@ def extract_product_payload(
     main_urls: list[str] = []
     detail_urls: list[str] = []
     video_urls: list[str] = []
+    product_parameters: list[dict[str, str]] = []
     title: str | None = None
     price: str | None = None
     title_keys = {"title", "goodstitle", "producttitle", "itemtitle"}
@@ -138,6 +281,9 @@ def extract_product_payload(
             current_identity_matched = identity_matched or bool(product_id and product_id in identifiers)
             for child_key, child_value in value.items():
                 normalized_child_key = str(child_key).replace("_", "").replace("-", "").lower()
+                if current_identity_matched and _is_parameter_container(normalized_child_key):
+                    product_parameters.extend(_parameter_rows(child_value))
+                    continue
                 if current_identity_matched and any(marker in normalized_child_key for marker in EXCLUDED_PRODUCT_SUBTREES):
                     continue
                 visit(child_value, str(child_key), current_identity_matched)
@@ -146,11 +292,27 @@ def extract_product_payload(
             for child in value:
                 visit(child, key, identity_matched)
 
-    visit(payload, identity_matched=not bool(product_id))
+    componentized_sources = _componentized_media_sources(payload, product_id)
+    if componentized_sources is None:
+        visit(payload, identity_matched=not bool(product_id))
+    else:
+        for source in componentized_sources:
+            visit(source, identity_matched=True)
+        for source in _componentized_parameter_sources(payload, product_id) or []:
+            product_parameters.extend(_parameter_rows(source))
+
+    deduplicated_parameters: list[dict[str, str]] = []
+    seen_parameter_names: set[str] = set()
+    for parameter in product_parameters:
+        if parameter["name"] in seen_parameter_names:
+            continue
+        seen_parameter_names.add(parameter["name"])
+        deduplicated_parameters.append(parameter)
     result: dict[str, object] = {
         "mainImageUrls": dedupe_urls(main_urls),
         "detailImageUrls": dedupe_urls(detail_urls),
         "videoUrls": dedupe_urls(video_urls),
+        "productParameters": deduplicated_parameters,
     }
     if title is not None:
         result["title"] = title
@@ -164,6 +326,7 @@ def merge_product_payloads(payloads: Iterable[dict[str, object]]) -> dict[str, o
         "mainImageUrls": [],
         "detailImageUrls": [],
         "videoUrls": [],
+        "productParameters": [],
     }
     for payload in payloads:
         for field in ("mainImageUrls", "detailImageUrls", "videoUrls"):
@@ -174,6 +337,19 @@ def merge_product_payloads(payloads: Iterable[dict[str, object]]) -> dict[str, o
             value = payload.get(field)
             if not merged.get(field) and isinstance(value, str) and value.strip():
                 merged[field] = value.strip()
+        known_parameter_names = {
+            str(item.get("name") or "")
+            for item in merged["productParameters"]
+            if isinstance(item, dict)
+        }
+        for item in payload.get("productParameters") or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "")
+            if not name or name in known_parameter_names:
+                continue
+            known_parameter_names.add(name)
+            merged["productParameters"].append(item)
     return merged
 
 

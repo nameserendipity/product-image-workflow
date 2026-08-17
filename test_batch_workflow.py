@@ -189,6 +189,76 @@ class BatchWorkflowTests(unittest.TestCase):
         client.acquire_lock.assert_not_called()
         client.publish.assert_not_called()
 
+    def test_kuaishou_batch_persists_visual_parameters_before_export(self) -> None:
+        workbook = self.root / "kuaishou.xlsx"
+        workbook.write_bytes(b"workbook")
+        output = self.root / "output"
+        item = DirectLinkBatchItem(
+            1,
+            1,
+            "https://app.kwaixiaodian.com/web/kwaishop-goods-detail-page-app?id=26065497098904",
+            "kuaishou",
+            "快手商品",
+        )
+        item_root = output / "001-row-0001"
+        source_manifest = self._shared_local_manifest(item_root)
+
+        def run_workflow(*_args, **_kwargs):
+            dossier = item_root / "generated" / "product-dossier.json"
+            dossier.parent.mkdir(parents=True, exist_ok=True)
+            dossier.write_text(
+                json.dumps(
+                    {
+                        "observations": [],
+                        "dossier": {
+                            "anchor_identity": {
+                                "source_index": 1,
+                                "object": "one pump shampoo bottle",
+                                "visible_product_labeling": ["800ml"],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return self._shared_generation_records(1, 1, 1)
+
+        exported_source: dict[str, object] = {}
+
+        def export(path, _item, manifest, *_args, **_kwargs):
+            exported_source.update(json.loads(manifest.read_text(encoding="utf-8")))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"xlsx")
+            return path
+
+        runner = BatchRunner(
+            ApiSettings("https://api.example", "vision", "image"),
+            self.root,
+            self.root,
+            batch_mode="direct_link",
+        )
+        with (
+            patch("batch_workflow.extract_direct_link_items", return_value=[item]),
+            patch("batch_workflow.restore_collected_manifest", return_value=(source_manifest, 3)),
+            patch(
+                "batch_workflow.ProductTitleClient.generate",
+                return_value={"long_title": "快手商品长标题", "short_title": "快手商品"},
+            ),
+            patch("batch_workflow.WorkflowRunner.run", side_effect=run_workflow),
+            patch("batch_workflow.upload_generation_records", side_effect=lambda rows, _uploader: rows),
+            patch("batch_workflow.export_product_workbook", side_effect=export),
+        ):
+            result = runner.run(workbook, output)
+
+        persisted_source = json.loads(source_manifest.read_text(encoding="utf-8"))
+        self.assertEqual(result[0]["status"], "completed")
+        self.assertEqual(exported_source["parameter_status"], "inferred")
+        self.assertTrue(exported_source["product_parameters"])
+        self.assertEqual(
+            persisted_source["product_parameters"],
+            exported_source["product_parameters"],
+        )
+
     def test_direct_link_shared_miss_publishes_after_export_and_releases(self) -> None:
         workbook = self.root / "shared-publish.xlsx"
         workbook.write_bytes(b"workbook")
@@ -1530,6 +1600,43 @@ class BatchWorkflowTests(unittest.TestCase):
         self.assertEqual(merged["sku_variants"], platform_variants)
         self.assertEqual(merged["sku_metadata_status"], "ok")
 
+    def test_screenshot_sku_metadata_replaces_reused_platform_variants(self) -> None:
+        screenshot = self.root / "current-sku-screenshot.png"
+        screenshot.write_bytes(b"screenshot")
+        item = DirectLinkBatchItem(
+            2,
+            3,
+            "https://haohuo.jinritemai.com/views/product/item2.html?id=9002",
+            "douyin",
+            sku_screenshot=screenshot,
+            manual_skus=(
+                {
+                    "sku_name": "current red",
+                    "color": "red",
+                    "spec": "1 piece",
+                    "price": "29.90",
+                    "reference_image": "current-red.png",
+                    "source_status": "screenshot_thumbnail",
+                },
+            ),
+        )
+        reused_variants = [
+            {
+                "sku_id": "old-1",
+                "sku_label": "old blue",
+                "reference_image": "old-blue.png",
+            }
+        ]
+
+        merged = merge_manual_sku_metadata(
+            {"sku_variants": reused_variants, "sku_metadata_status": "ok"},
+            item,
+        )
+
+        self.assertEqual(merged["sku_variants"][0]["sku_label"], "current red")
+        self.assertEqual(merged["sku_variants"][0]["reference_image"], "current-red.png")
+        self.assertEqual(merged["sku_metadata_status"], "screenshot")
+
     def test_manual_sku_images_do_not_replace_platform_generation_sources(self) -> None:
         item = DirectReplaceBatchItem(
             1,
@@ -2128,7 +2235,18 @@ class BatchWorkflowTests(unittest.TestCase):
                             }
                         }
                     ],
-                    "product_parameters": [{"name": "材质", "value": "棉"}],
+                    "product_parameters": [
+                        {
+                            "name": "材质",
+                            "value": "棉",
+                            "handling": "图片识别，待核验",
+                        },
+                        {
+                            "name": "包装结构",
+                            "value": "白色塑料泵瓶，正面印有商品名称和容量标识；" * 20,
+                            "handling": "图片识别，待核验",
+                        },
+                    ],
                     "sku_variants": [
                         {
                             "source_index": "1",
@@ -2236,6 +2354,8 @@ class BatchWorkflowTests(unittest.TestCase):
             self.assertGreater(workbook["标题"].row_dimensions[2].height, 22)
             self.assertEqual(workbook["标题"]["C2"].value, "短标题")
             self.assertEqual(workbook["视频"]["C2"].value, "https://cloud.video.taobao.com/play/123.mp4")
+            self.assertEqual(workbook["商品参数"]["D2"].value, "图片识别，待核验")
+            self.assertGreater(workbook["商品参数"].row_dimensions[3].height, 96)
         finally:
             workbook.close()
 
