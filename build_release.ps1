@@ -6,7 +6,6 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $pyinstaller = Join-Path $projectRoot ".venv\Scripts\pyinstaller.exe"
-$node = "D:\nodejs\node.exe"
 $releaseName = "商品图片工作流-Excel批处理版-$Version"
 $releaseRoot = Join-Path $projectRoot "dist\$releaseName"
 $buildRoot = Join-Path $projectRoot "build\release-$Version"
@@ -20,7 +19,7 @@ function Copy-Directory([string]$Source, [string]$Destination) {
     }
 }
 
-foreach ($required in @($python, $pyinstaller, $node, (Join-Path $projectRoot "web"), (Join-Path $projectRoot "spreadsheet_runtime\exporter.mjs"))) {
+foreach ($required in @($python, $pyinstaller, (Join-Path $projectRoot "web"), (Join-Path $projectRoot "workbook_exporter.py"))) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Missing required build dependency: $required"
     }
@@ -43,7 +42,10 @@ if ($LASTEXITCODE -ne 0) { throw "Same-item collector build failed." }
 Copy-Item -Path (Join-Path $distRoot "ProductImageWorkflow\*") -Destination $releaseRoot -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $distRoot "store_insight_collector.exe") -Destination $releaseRoot -Force
 Copy-Item -LiteralPath (Join-Path $distRoot "same_item_collector.exe") -Destination $releaseRoot -Force
-foreach ($file in @("启动程序.bat", "README.md", "操作说明书.md", "local_settings.example.json")) {
+foreach ($file in @(
+    "启动程序.bat", "安装依赖.bat", "bootstrap.ps1", "requirements.txt", "requirements.lock.txt",
+    "runtime-versions.json", "README.md", "操作说明书.md", "local_settings.example.json"
+)) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination $releaseRoot -Force
 }
 $sourceSettingsPath = Join-Path $projectRoot "local_settings.json"
@@ -72,10 +74,7 @@ New-Item -ItemType Directory -Path (Join-Path $releaseRoot "docs") -Force | Out-
 foreach ($document in @("oss-shared-library-setup.md", "douyin-direct-replace-user-guide.md")) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "docs\$document") -Destination (Join-Path $releaseRoot "docs\$document") -Force
 }
-New-Item -ItemType Directory -Path (Join-Path $releaseRoot "runtime"), (Join-Path $releaseRoot "spreadsheet_runtime"), (Join-Path $releaseRoot "outputs") | Out-Null
-Copy-Item -LiteralPath $node -Destination (Join-Path $releaseRoot "runtime\node.exe") -Force
-Copy-Item -LiteralPath (Join-Path $projectRoot "spreadsheet_runtime\exporter.mjs") -Destination (Join-Path $releaseRoot "spreadsheet_runtime\exporter.mjs") -Force
-Copy-Directory (Join-Path $projectRoot "spreadsheet_runtime\node_modules") (Join-Path $releaseRoot "spreadsheet_runtime\node_modules")
+New-Item -ItemType Directory -Path (Join-Path $releaseRoot "outputs") | Out-Null
 
 $archive = Join-Path $projectRoot "dist\$releaseName.zip"
 Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
