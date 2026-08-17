@@ -42,20 +42,23 @@ function Get-PythonVersion([string]$Python) {
     return ([string]$value).Trim()
 }
 
-function Get-PythonCommand {
-    $localPython = Join-Path $RuntimeRoot "python-3.12.10\python.exe"
+function Get-PythonCommand([string]$ExpectedVersion) {
+    $localPython = Join-Path $RuntimeRoot "python-$ExpectedVersion\python.exe"
     if (Test-Path -LiteralPath $localPython) {
-        if ((Get-PythonVersion $localPython) -like "3.12.*") { return $localPython }
+        if ((Get-PythonVersion $localPython) -eq $ExpectedVersion) { return $localPython }
     }
 
     foreach ($candidate in @("py", "python")) {
         try {
             if ($candidate -eq "py") {
                 $version = & py -3.12 -c "import sys; print(sys.executable)" 2>$null
-                if ($LASTEXITCODE -eq 0 -and $version) { return ([string]$version).Trim() }
+                if ($LASTEXITCODE -eq 0 -and $version) {
+                    $candidatePath = ([string]$version).Trim()
+                    if ((Get-PythonVersion $candidatePath) -eq $ExpectedVersion) { return $candidatePath }
+                }
             } else {
                 $command = Get-Command $candidate -ErrorAction SilentlyContinue
-                if ($command -and (Get-PythonVersion $command.Source) -like "3.12.*") { return $command.Source }
+                if ($command -and (Get-PythonVersion $command.Source) -eq $ExpectedVersion) { return $command.Source }
             }
         } catch {
             continue
@@ -65,10 +68,10 @@ function Get-PythonCommand {
 }
 
 function Ensure-PythonRuntime($Manifest) {
-    $python = Get-PythonCommand
+    $version = [string]$Manifest.python.version
+    $python = Get-PythonCommand $version
     if ($python) { return $python }
 
-    $version = [string]$Manifest.python.version
     $installerUrl = [string]$Manifest.python.installer_url
     $expectedHash = ([string]$Manifest.python.sha256).ToLowerInvariant()
     if ($version -ne "3.12.10" -or -not $expectedHash -or $expectedHash.Length -ne 64) {
@@ -99,14 +102,14 @@ function Ensure-PythonRuntime($Manifest) {
         if ($process.ExitCode -ne 0) { throw "Python 安装失败，退出码 $($process.ExitCode)。" }
     }
     $python = Join-Path $target "python.exe"
-    if ((Get-PythonVersion $python) -notlike "3.12.*") { throw "准备好的 Python 版本不是 3.12。" }
+    if ((Get-PythonVersion $python) -ne $version) { throw "准备好的 Python 版本不是 $version。" }
     return $python
 }
 
-function Ensure-Venv([string]$Python) {
+function Ensure-Venv([string]$Python, [string]$ExpectedVersion) {
     $venvPython = Join-Path $VenvRoot "Scripts\python.exe"
     if (Test-Path -LiteralPath $venvPython) {
-        if ((Get-PythonVersion $venvPython) -like "3.12.*") { return $venvPython }
+        if ((Get-PythonVersion $venvPython) -eq $ExpectedVersion) { return $venvPython }
     }
     New-Item -ItemType Directory -Force -Path $VenvRoot | Out-Null
     Invoke-Python $Python @("-m", "venv", $VenvRoot, "--clear")
@@ -165,7 +168,7 @@ function Check-Environment($Manifest, [string]$ManifestHash, [string]$LockHash) 
     if (-not (Test-Path -LiteralPath $SettingsPath)) { throw "缺少 local_settings.json。请先运行 Ensure。" }
     $venvPython = Join-Path $VenvRoot "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $venvPython)) { throw "缺少 .venv，请先运行 Ensure。" }
-    if ((Get-PythonVersion $venvPython) -notlike "3.12.*") { throw ".venv 不是 Python 3.12。" }
+    if ((Get-PythonVersion $venvPython) -ne ([string]$Manifest.python.version)) { throw ".venv 不是清单指定的 Python 版本。" }
     $state = if (Test-Path -LiteralPath $StatePath) { Read-Json $StatePath } else { $null }
     if (-not $state -or $state.runtime_manifest_sha256 -ne $ManifestHash -or $state.requirements_sha256 -ne $LockHash) {
         throw "依赖状态已过期，请重新运行 Ensure。"
@@ -186,7 +189,7 @@ try {
     }
 
     $python = Ensure-PythonRuntime $manifest
-    $venvPython = Ensure-Venv $python
+    $venvPython = Ensure-Venv $python ([string]$manifest.python.version)
     $state = if (Test-Path -LiteralPath $StatePath) { Read-Json $StatePath } else { [pscustomobject]@{} }
     Ensure-Dependencies $venvPython $lockHash $state
     Ensure-Chromium $venvPython $lockHash $state
