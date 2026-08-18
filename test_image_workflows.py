@@ -34,6 +34,31 @@ class ApiSettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.vision_model, "gpt-5.5")
 
+    def test_vision_request_profiles_set_reasoning_output_and_json_policy(self):
+        expected = {
+            "preflight": (64, False),
+            "title": (1024, True),
+            "identity": (2048, True),
+            "sku": (2048, True),
+            "analysis": (4096, True),
+            "dossier": (4096, True),
+        }
+
+        for request_kind, (limit, wants_json) in expected.items():
+            payload = image_workflows.build_vision_payload(
+                "gpt-5.5",
+                [{"role": "user", "content": "test"}],
+                request_kind,
+                json_response=wants_json,
+            )
+
+            self.assertEqual(payload["reasoning_effort"], "low")
+            self.assertEqual(payload["max_completion_tokens"], limit)
+            if wants_json:
+                self.assertEqual(payload["response_format"], {"type": "json_object"})
+            else:
+                self.assertNotIn("response_format", payload)
+
 
 class PromptCompositionTests(unittest.TestCase):
     @staticmethod
@@ -335,6 +360,29 @@ class ImageRequestRetryTests(unittest.TestCase):
         self.assertEqual(result, {"choices": []})
         self.assertEqual(urlopen.call_count, 2)
         sleep.assert_called_once_with(2)
+
+    def test_json_request_reports_queue_request_attempt_and_outcome_timing(self):
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = b'{"choices":[]}'
+        timings = []
+
+        with patch("image_workflows.urlopen", return_value=response):
+            result = image_workflows._send_json_request(
+                Mock(),
+                timeout=10,
+                timing_callback=timings.append,
+                request_kind="analysis",
+            )
+
+        self.assertEqual(result, {"choices": []})
+        self.assertEqual(len(timings), 1)
+        self.assertEqual(timings[0]["attempt"], 1)
+        self.assertEqual(timings[0]["request_kind"], "analysis")
+        self.assertTrue(timings[0]["success"])
+        self.assertGreaterEqual(timings[0]["queue_seconds"], 0)
+        self.assertGreaterEqual(timings[0]["request_seconds"], 0)
 
     def test_visual_image_payload_is_downscaled_before_base64_encoding(self):
         with tempfile.TemporaryDirectory() as directory:

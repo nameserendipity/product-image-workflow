@@ -2298,12 +2298,23 @@ class RequestHandler(SimpleHTTPRequestHandler):
         message = str(event.get("message") or "").strip()
         if not message:
             status = str(event.get("status") or "")
+            event_type = status or str(event.get("stage") or "")
             stage_label = str(event.get("stage_label") or "").strip()
-            if status in {"vision_preflight", "vision_preflight_ready", "identity_analyzing"}:
-                suffix = f"（{event.get('source_count', 0)} 张素材）" if status == "identity_analyzing" else ""
+            if event_type in {"vision_preflight", "vision_preflight_ready", "identity_analyzing"}:
+                suffix = f"（{event.get('source_count', 0)} 张素材）" if event_type == "identity_analyzing" else ""
                 message = f"{stage_label}{suffix}"
             elif int(event.get("ordinal") or 0) > 0 and status in {"analyzing", "prompt_ready", "generating"}:
                 message = f"{event.get('category')} #{event.get('ordinal')}：{stage_label}"
+            elif event_type == "vision_timing":
+                request_kind = str(event.get("request_kind") or "视觉请求")
+                queue_seconds = float(event.get("queue_seconds") or 0)
+                request_seconds = float(event.get("request_seconds") or 0)
+                attempt = int(event.get("attempt") or 1)
+                retry_suffix = f"，第 {attempt} 次尝试" if attempt > 1 else ""
+                message = (
+                    f"视觉分析 {request_kind}：等待并发槽位 {queue_seconds:.1f} 秒，"
+                    f"模型响应 {request_seconds:.1f} 秒{retry_suffix}"
+                )
             elif status == "failed":
                 failure_stage = str(event.get("failure_stage") or "生成流程")
                 message = f"{event.get('category')} #{event.get('ordinal')}：{failure_stage}失败：{event.get('error', '')}"

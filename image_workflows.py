@@ -28,9 +28,12 @@ from PIL import Image
 
 CATEGORIES = ("main", "sku", "detail")
 UpdateCallback = Callable[[dict[str, Any]], None]
+RequestTimingCallback = Callable[[dict[str, Any]], None]
 VISUAL_ANALYSIS_CONCURRENCY = 10
 IMAGE_GENERATION_CONCURRENCY = 10
 VISION_INITIAL_CONCURRENCY = 5
+VISION_SLOW_REQUEST_SECONDS = 30.0
+VISION_QUEUE_REPORT_SECONDS = 5.0
 VISION_IMAGE_MAX_SIDE = 1280
 VISION_IMAGE_MAX_BYTES = 1_500_000
 IDENTITY_SOURCE_LIMIT = 16
@@ -102,6 +105,60 @@ _IMAGE_REQUEST_GATE = AdaptiveRequestGate(
     initial_concurrency=IMAGE_GENERATION_CONCURRENCY,
     min_concurrency=IMAGE_GENERATION_CONCURRENCY,
 )
+
+VISION_REQUEST_PROFILES = {
+    "preflight": {"max_completion_tokens": 64, "json_response": False},
+    "title": {"max_completion_tokens": 1024, "json_response": True},
+    "identity": {"max_completion_tokens": 2048, "json_response": True},
+    "sku": {"max_completion_tokens": 2048, "json_response": True},
+    "analysis": {"max_completion_tokens": 4096, "json_response": True},
+    "dossier": {"max_completion_tokens": 4096, "json_response": True},
+}
+
+
+def build_vision_payload(
+    model: str,
+    messages: list[dict[str, Any]],
+    request_kind: str,
+    *,
+    json_response: bool | None = None,
+) -> dict[str, Any]:
+    try:
+        profile = VISION_REQUEST_PROFILES[request_kind]
+    except KeyError as error:
+        raise ValueError(f"Unknown vision request kind: {request_kind}") from error
+    wants_json = bool(profile["json_response"] if json_response is None else json_response)
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "reasoning_effort": "low",
+        "max_completion_tokens": int(profile["max_completion_tokens"]),
+    }
+    if wants_json:
+        payload["response_format"] = {"type": "json_object"}
+    return payload
+
+
+def is_noteworthy_vision_timing(timing: dict[str, Any]) -> bool:
+    return (
+        not bool(timing.get("success"))
+        or int(timing.get("attempt") or 1) > 1
+        or float(timing.get("queue_seconds") or 0) >= VISION_QUEUE_REPORT_SECONDS
+        or float(timing.get("request_seconds") or 0) >= VISION_SLOW_REQUEST_SECONDS
+    )
+
+
+def _notify_request_timing(
+    callback: RequestTimingCallback | None,
+    timing: dict[str, Any],
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(timing)
+    except Exception:
+        # Diagnostics must never turn a successful API request into a failed task.
+        pass
 
 
 @contextmanager
@@ -282,7 +339,15 @@ def normalize_view_type(value: Any) -> str:
     return "back" if normalized == "rear" else normalized
 
 
-def _request_json(url: str, api_key: str, payload: dict[str, Any], timeout: int = 180) -> dict[str, Any]:
+def _request_json(
+    url: str,
+    api_key: str,
+    payload: dict[str, Any],
+    timeout: int = 180,
+    *,
+    timing_callback: RequestTimingCallback | None = None,
+    request_kind: str = "unknown",
+) -> dict[str, Any]:
     request = Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -293,7 +358,12 @@ def _request_json(url: str, api_key: str, payload: dict[str, Any], timeout: int 
         },
         method="POST",
     )
-    return _send_json_request(request, timeout)
+    return _send_json_request(
+        request,
+        timeout,
+        timing_callback=timing_callback,
+        request_kind=request_kind,
+    )
 
 
 def _redirected_post_request(request: Request, location: str) -> Request:
@@ -315,16 +385,42 @@ def _retry_delay(attempt: int, retry_after: str | None = None) -> float:
     return base + random.uniform(0.0, min(3.0, base * 0.25))
 
 
-def _send_json_request(request: Request, timeout: int, attempts: int = 5) -> dict[str, Any]:
+def _send_json_request(
+    request: Request,
+    timeout: int,
+    attempts: int = 5,
+    *,
+    timing_callback: RequestTimingCallback | None = None,
+    request_kind: str = "unknown",
+) -> dict[str, Any]:
     redirects = 0
     for attempt in range(attempts):
+        queue_started = time.perf_counter()
+        queue_seconds = 0.0
+        request_started = None
+        request_seconds = 0.0
+        last_error: BaseException | None = None
         try:
             with _request_slot(_VISION_REQUEST_GATE) as mark_success:
+                request_started = time.perf_counter()
+                queue_seconds = request_started - queue_started
                 with urlopen(request, timeout=timeout) as response:
                     result = json.loads(response.read().decode("utf-8"))
+                request_seconds = time.perf_counter() - request_started
                 mark_success()
+                _notify_request_timing(
+                    timing_callback,
+                    {
+                        "request_kind": request_kind,
+                        "attempt": attempt + 1,
+                        "queue_seconds": queue_seconds,
+                        "request_seconds": request_seconds,
+                        "success": True,
+                    },
+                )
                 return result
         except HTTPError as error:
+            last_error = error
             message = error.read().decode("utf-8", errors="replace")[:500]
             location = error.headers.get("Location") if error.headers else None
             if error.code in {307, 308} and location and redirects < 3:
@@ -335,7 +431,19 @@ def _send_json_request(request: Request, timeout: int, attempts: int = 5) -> dic
                 suffix = f"; Location: {location}" if location else ""
                 raise RuntimeError(f"HTTP {error.code}: {message}{suffix}") from error
             if attempt + 1 == attempts:
-                raise RuntimeError(f"HTTP {error.code} after {attempts} attempts: {message}") from error
+                final_error = RuntimeError(f"HTTP {error.code} after {attempts} attempts: {message}")
+                _notify_request_timing(
+                    timing_callback,
+                    {
+                        "request_kind": request_kind,
+                        "attempt": attempt + 1,
+                        "queue_seconds": queue_seconds,
+                        "request_seconds": request_seconds,
+                        "success": False,
+                        "error": str(final_error),
+                    },
+                )
+                raise final_error from error
             retry_after = error.headers.get("Retry-After") if error.headers else None
         except (
             URLError,
@@ -347,10 +455,38 @@ def _send_json_request(request: Request, timeout: int, attempts: int = 5) -> dic
             IncompleteRead,
             ssl.SSLError,
         ) as error:
+            last_error = error
             reason = error.reason if isinstance(error, URLError) else str(error)
             if attempt + 1 == attempts:
-                raise RuntimeError(f"Network request failed after {attempts} attempts: {reason}") from error
+                final_error = RuntimeError(f"Network request failed after {attempts} attempts: {reason}")
+                _notify_request_timing(
+                    timing_callback,
+                    {
+                        "request_kind": request_kind,
+                        "attempt": attempt + 1,
+                        "queue_seconds": queue_seconds,
+                        "request_seconds": request_seconds,
+                        "success": False,
+                        "error": str(final_error),
+                    },
+                )
+                raise final_error from error
             retry_after = None
+        _notify_request_timing(
+            timing_callback,
+            {
+                "request_kind": request_kind,
+                "attempt": attempt + 1,
+                "queue_seconds": queue_seconds,
+                "request_seconds": (
+                    time.perf_counter() - request_started
+                    if request_started is not None and request_seconds == 0.0
+                    else request_seconds
+                ),
+                "success": False,
+                "error": str(last_error or "request failed"),
+            },
+        )
         if attempt + 1 < attempts:
             time.sleep(_retry_delay(attempt, retry_after))
     raise RuntimeError("Network request failed")
@@ -1236,8 +1372,13 @@ Output one finished ecommerce image. It will be manually reviewed for product st
 
 
 class VisionClient:
-    def __init__(self, settings: ApiSettings):
+    def __init__(
+        self,
+        settings: ApiSettings,
+        timing_callback: RequestTimingCallback | None = None,
+    ):
         self.settings = settings
+        self.timing_callback = timing_callback
 
     def analyze_identity_source(self, source: IdentitySource) -> dict[str, Any]:
         instruction = f"""Analyze one collected ecommerce product image and return JSON only.
@@ -1249,9 +1390,9 @@ Return exactly these top-level keys: source_index, category, visible_views, silh
 proportions, colors, materials, visible_components, local_details, branding_and_risks,
 uncertainties. Describe only visible facts. Do not infer hidden structures, specifications,
 functions, origin, certification, or efficacy. Use short category-neutral values."""
-        payload = {
-            "model": self.settings.vision_model,
-            "messages": [
+        payload = build_vision_payload(
+            self.settings.vision_model,
+            [
                 {
                     "role": "system",
                     "content": "You extract auditable visible product facts from one image and return strict JSON.",
@@ -1264,11 +1405,14 @@ functions, origin, certification, or efficacy. Use short category-neutral values
                     ],
                 },
             ],
-        }
+            "identity",
+        )
         response = _request_json(
             self.settings.endpoint("/v1/chat/completions"),
             self.settings.vision_api_key,
             payload,
+            timing_callback=self.timing_callback,
+            request_kind="identity",
         )
         content = response.get("choices", [{}])[0].get("message", {}).get("content")
         if not isinstance(content, str):
@@ -1316,20 +1460,23 @@ Each detail plan requires ordinal, view_type, focus, and supporting_source_index
 
 Observations:
 {json.dumps(observations, ensure_ascii=False)}"""
-        payload = {
-            "model": self.settings.vision_model,
-            "messages": [
+        payload = build_vision_payload(
+            self.settings.vision_model,
+            [
                 {
                     "role": "system",
                     "content": "You merge visible product evidence and plan diverse detail images. Return strict JSON.",
                 },
                 {"role": "user", "content": instruction},
             ],
-        }
+            "dossier",
+        )
         response = _request_json(
             self.settings.endpoint("/v1/chat/completions"),
             self.settings.vision_api_key,
             payload,
+            timing_callback=self.timing_callback,
+            request_kind="dossier",
         )
         content = response.get("choices", [{}])[0].get("message", {}).get("content")
         if not isinstance(content, str):
@@ -1521,9 +1668,9 @@ Observations:
             if generation_mode == "competitor_reference"
             else (product_image, reference_image)
         )
-        payload = {
-            "model": self.settings.vision_model,
-            "messages": [
+        payload = build_vision_payload(
+            self.settings.vision_model,
+            [
                 {
                     "role": "system",
                     "content": (
@@ -1546,10 +1693,15 @@ Observations:
                     ],
                 },
             ],
-        }
+            "analysis",
+        )
         for attempt in range(3):
             response = _request_json(
-                self.settings.endpoint("/v1/chat/completions"), self.settings.vision_api_key, payload
+                self.settings.endpoint("/v1/chat/completions"),
+                self.settings.vision_api_key,
+                payload,
+                timing_callback=self.timing_callback,
+                request_kind="analysis",
             )
             content = response.get("choices", [{}])[0].get("message", {}).get("content")
             try:
@@ -1586,9 +1738,9 @@ Use empty strings when text is unreadable. Never guess unreadable text, price, c
 Set is_clear to false when the thumbnail is too small, blurred, occluded, or cannot be matched to the SKU row.
 confidence is a number from 0 to 1 describing the combined confidence in the row and thumbnail mapping.
 Coordinates must describe only the thumbnail, not the price or surrounding text."""
-        payload = {
-            "model": self.settings.vision_model,
-            "messages": [
+        payload = build_vision_payload(
+            self.settings.vision_model,
+            [
                 {
                     "role": "system",
                     "content": "You extract auditable SKU data from one screenshot and return strict JSON.",
@@ -1601,11 +1753,14 @@ Coordinates must describe only the thumbnail, not the price or surrounding text.
                     ],
                 },
             ],
-        }
+            "sku",
+        )
         response = _request_json(
             self.settings.endpoint("/v1/chat/completions"),
             self.settings.vision_api_key,
             payload,
+            timing_callback=self.timing_callback,
+            request_kind="sku",
         )
         content = response.get("choices", [{}])[0].get("message", {}).get("content")
         if not isinstance(content, str):
@@ -1638,12 +1793,17 @@ Coordinates must describe only the thumbnail, not the price or surrounding text.
         return {"skus": normalized}
 
     def verify(self) -> None:
-        payload = {
-            "model": self.settings.vision_model,
-            "messages": [{"role": "user", "content": "Reply with READY."}],
-        }
+        payload = build_vision_payload(
+            self.settings.vision_model,
+            [{"role": "user", "content": "Reply with READY."}],
+            "preflight",
+        )
         response = _request_json(
-            self.settings.endpoint("/v1/chat/completions"), self.settings.vision_api_key, payload
+            self.settings.endpoint("/v1/chat/completions"),
+            self.settings.vision_api_key,
+            payload,
+            timing_callback=self.timing_callback,
+            request_kind="preflight",
         )
         content = response.get("choices", [{}])[0].get("message", {}).get("content")
         if not isinstance(content, str) or not content.strip():
@@ -1651,8 +1811,13 @@ Coordinates must describe only the thumbnail, not the price or surrounding text.
 
 
 class ProductTitleClient:
-    def __init__(self, settings: ApiSettings):
+    def __init__(
+        self,
+        settings: ApiSettings,
+        timing_callback: RequestTimingCallback | None = None,
+    ):
         self.settings = settings
+        self.timing_callback = timing_callback
 
     def generate(
         self,
@@ -1681,9 +1846,9 @@ class ProductTitleClient:
             )
             if attempt and error:
                 instruction += f"\n上一次结果未通过长度校验：{error}。请严格修正后重新输出。"
-            payload = {
-                "model": self.settings.vision_model,
-                "messages": [
+            payload = build_vision_payload(
+                self.settings.vision_model,
+                [
                     {
                         "role": "system",
                         "content": "你是严谨的中文电商标题编辑，只输出可解析的 JSON。",
@@ -1696,11 +1861,14 @@ class ProductTitleClient:
                         ],
                     },
                 ],
-            }
+                "title",
+            )
             response = _request_json(
                 self.settings.endpoint("/v1/chat/completions"),
                 self.settings.vision_api_key,
                 payload,
+                timing_callback=self.timing_callback,
+                request_kind="title",
             )
             content = response.get("choices", [{}])[0].get("message", {}).get("content")
             if not isinstance(content, str):
@@ -2122,6 +2290,14 @@ class WorkflowRunner:
             }
         )
 
+    def _emit_vision_timing(self, timing: dict[str, Any], task: ImageTask | None = None) -> None:
+        if not is_noteworthy_vision_timing(timing):
+            return
+        if task is None:
+            self._emit_detail_phase("vision_timing", **timing)
+        else:
+            self._emit(task, "vision_timing", **timing)
+
     def _save_records(self, output_root: Path) -> None:
         document = {
             "schema_version": 3,
@@ -2201,7 +2377,10 @@ class WorkflowRunner:
             return cached.result()
 
         try:
-            vision_client = VisionClient(self.settings)
+            vision_client = VisionClient(
+                self.settings,
+                timing_callback=lambda timing: self._emit_vision_timing(timing, task),
+            )
             with _VISUAL_ANALYSIS_SLOTS[task.category]:
                 if generation_mode == "own_product":
                     analysis = vision_client.analyze(product_image, task.source_path, task.category)
@@ -2445,7 +2624,10 @@ class WorkflowRunner:
             raise ValueError("The manifest contains no usable main, SKU, or detail images")
 
         output_root.mkdir(parents=True, exist_ok=True)
-        vision_client = VisionClient(self.settings)
+        vision_client = VisionClient(
+            self.settings,
+            timing_callback=self._emit_vision_timing,
+        )
         self._emit_detail_phase("vision_preflight", stage_label="视觉接口预检")
         vision_client.verify()
         self._emit_detail_phase("vision_preflight_ready", stage_label="视觉接口预检完成")

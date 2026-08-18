@@ -20,6 +20,41 @@ class GenerationErrorMessageTests(unittest.TestCase):
 
         self.assertIn("gpt-5.5", unauthorized)
         self.assertIn("gpt-5.5", unavailable)
+
+
+class VisionTimingEventTests(unittest.TestCase):
+    def test_vision_timing_event_does_not_change_workflow_progress(self):
+        state = web_app.AppState()
+        state.events = [
+            {"category": "main", "ordinal": 1, "status": "vision_timing"},
+        ]
+
+        progress = state._workflow_progress()
+
+        self.assertEqual(progress["main"], {
+            "analyzing": 0,
+            "prompt_ready": 0,
+            "generating": 0,
+            "completed": 0,
+            "failed": 0,
+        })
+
+    def test_slow_vision_timing_event_is_logged_once(self):
+        handler = object.__new__(web_app.RequestHandler)
+
+        with patch.object(web_app.STATE, "log") as log:
+            handler._on_batch_event({
+                "status": "vision_timing",
+                "request_kind": "analysis",
+                "queue_seconds": 6.25,
+                "request_seconds": 42.5,
+                "attempt": 1,
+                "success": True,
+            })
+
+        log.assert_called_once()
+        self.assertIn("视觉分析", log.call_args.args[0])
+        self.assertIn("42.5", log.call_args.args[0])
 from agent_flow import AgentSession
 from batch_workflow import DirectLinkBatchItem, DirectReplaceBatchItem, save_batch_results
 from shared_library_client import CatalogPage, LockLease, SharedLibraryUnavailable, SharedProbe

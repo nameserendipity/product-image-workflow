@@ -30,6 +30,7 @@ from image_workflows import (
     VisionClient,
     WorkflowRunner,
     build_detail_tasks,
+    is_noteworthy_vision_timing,
     load_identity_sources,
     load_manifest_tasks,
     resolve_identity_image,
@@ -1723,7 +1724,10 @@ class BatchRunner:
                 row=item.row_number,
                 message="正在分析 SKU 截图并裁剪可用参考图",
             )
-            analysis = VisionClient(self.settings).analyze_sku_screenshot(item.sku_screenshot)
+            analysis = VisionClient(
+                self.settings,
+                timing_callback=lambda timing: self._vision_timing_callback(item.sequence, timing),
+            ).analyze_sku_screenshot(item.sku_screenshot)
             variants = materialize_sku_screenshot_references(
                 item.sku_screenshot,
                 analysis,
@@ -1749,6 +1753,10 @@ class BatchRunner:
     def _emit(self, **event: Any) -> None:
         if self.callback:
             self.callback(event)
+
+    def _vision_timing_callback(self, sequence: int, timing: dict[str, Any]) -> None:
+        if is_noteworthy_vision_timing(timing):
+            self._emit(stage="vision_timing", sequence=sequence, **timing)
 
     def cancel(self) -> None:
         self.cancel_event.set()
@@ -2455,7 +2463,10 @@ class BatchRunner:
                     row=item.row_number,
                     message="正在生成商品长短标题",
                 )
-                titles = ProductTitleClient(self.settings).generate(
+                titles = ProductTitleClient(
+                    self.settings,
+                    timing_callback=lambda timing: self._vision_timing_callback(item.sequence, timing),
+                ).generate(
                     product_image,
                     item.title,
                     str(top_product.get("title") or ""),
