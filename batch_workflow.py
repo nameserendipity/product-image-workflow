@@ -898,11 +898,15 @@ def plan_batch_retry_ordinals(
     categories: tuple[str, ...],
     previous_records: list[dict[str, Any]],
     max_main_images: int | None,
+    max_sku_images: int | None = None,
+    max_detail_images: int | None = None,
 ) -> dict[str, list[int]]:
     expected_tasks = load_manifest_tasks(
         manifest_path,
         categories,
         max_main_images=max_main_images,
+        max_sku_images=max_sku_images,
+        max_detail_images=max_detail_images,
     )
     valid_keys = {
         (str(record.get("category") or ""), int(record.get("ordinal") or 0))
@@ -1680,6 +1684,8 @@ class BatchRunner:
         collect_only: bool = False,
         shared_library: SharedLibraryClient | None = None,
         shared_cache: SharedLibraryCache | None = None,
+        max_sku_images: int | None = None,
+        max_detail_images: int | None = None,
     ) -> None:
         if batch_mode not in {"image_search", "direct_link", "direct_replace"}:
             raise ValueError(f"Unknown batch mode: {batch_mode}")
@@ -1688,6 +1694,8 @@ class BatchRunner:
         self.profile_dir = profile_dir
         self.browser_executable = browser_executable.strip()
         self.max_main_images = max_main_images
+        self.max_sku_images = max_sku_images
+        self.max_detail_images = max_detail_images
         self.callback = callback
         self.oss_uploader = oss_uploader
         self.batch_mode = batch_mode
@@ -2452,6 +2460,8 @@ class BatchRunner:
                         available_types,
                         previous_generation_records,
                         self.max_main_images,
+                        self.max_sku_images,
+                        self.max_detail_images,
                     )
                     if previous_generation_records
                     else None
@@ -2491,6 +2501,8 @@ class BatchRunner:
                         None,
                         available_types,
                         self.max_main_images,
+                        max_sku_images=self.max_sku_images,
+                        max_detail_images=self.max_detail_images,
                         generation_mode="competitor_reference" if self.batch_mode == "direct_link" else "own_product",
                         identity_image=product_image,
                         requested_ordinals=retry_ordinals,
@@ -2564,8 +2576,8 @@ class BatchRunner:
                             generation_mode="competitor_reference",
                             workflows=available_types,
                             max_main_images=self.max_main_images,
-                            max_sku_images=None,
-                            max_detail_images=None,
+                            max_sku_images=self.max_sku_images,
+                            max_detail_images=self.max_detail_images,
                         )
                         if package is not None:
                             self.shared_library.publish(

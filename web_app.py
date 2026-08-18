@@ -2257,13 +2257,19 @@ class RequestHandler(SimpleHTTPRequestHandler):
             ROOT,
             COLLECTOR_PROFILE_ROOT,
             browser_executable=load_browser_executable(),
-            max_main_images=DEFAULT_MAIN_IMAGES if batch_mode in {"direct_link", "direct_replace"} else STATE.agent.max_main_images,
+            max_main_images=(
+                STATE.agent.max_main_images
+                if STATE.agent.max_main_images is not None
+                else DEFAULT_MAIN_IMAGES if batch_mode in {"direct_link", "direct_replace"} else None
+            ),
             callback=self._on_batch_event,
             oss_uploader=oss_uploader,
             batch_mode=batch_mode,
             collect_only=collect_only,
             shared_library=shared_library,
             shared_cache=shared_cache,
+            max_sku_images=STATE.agent.max_sku_images,
+            max_detail_images=STATE.agent.max_detail_images,
         )
         with STATE.lock:
             STATE.batch_running = True

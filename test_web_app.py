@@ -1331,6 +1331,35 @@ class AppStateTaskIsolationTests(unittest.TestCase):
         self.assertTrue(runner_class.call_args.kwargs["collect_only"])
         handler._json.assert_called_once()
 
+    def test_batch_start_forwards_user_generation_limits(self):
+        state = web_app.AppState()
+        workbook = self.root / "limits.xlsx"
+        workbook.write_bytes(b"workbook")
+        output = self.root / "batch-limits"
+        output.mkdir()
+        state.batch_input = workbook
+        state.batch_output = output
+        state.batch_mode = "direct_replace"
+        state.agent.max_main_images = 5
+        state.agent.max_sku_images = 4
+        state.agent.max_detail_images = 6
+        handler = object.__new__(web_app.RequestHandler)
+        handler._json_body = Mock(return_value={"run_mode": "full"})
+        handler._json = Mock()
+
+        with (
+            patch.object(web_app, "STATE", state),
+            patch.object(web_app, "load_api_settings", return_value=Mock()),
+            patch.object(web_app, "load_optional_oss_uploader", return_value=(None, None)),
+            patch.object(web_app, "BatchRunner") as runner_class,
+            patch.object(web_app.threading.Thread, "start"),
+        ):
+            handler._start_batch()
+
+        self.assertEqual(runner_class.call_args.kwargs["max_main_images"], 5)
+        self.assertEqual(runner_class.call_args.kwargs["max_sku_images"], 4)
+        self.assertEqual(runner_class.call_args.kwargs["max_detail_images"], 6)
+
     def test_direct_link_batch_wires_shared_library_from_oss_uploader(self):
         state = web_app.AppState()
         workbook = self.root / "links.xlsx"

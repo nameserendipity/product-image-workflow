@@ -24,6 +24,7 @@ from batch_workflow import (
     export_product_workbook,
     plan_supplement_ordinals,
     plan_all_supplement_ordinals,
+    plan_batch_retry_ordinals,
     extract_batch_items,
     extract_direct_link_items,
     extract_direct_replace_items,
@@ -46,6 +47,28 @@ from shared_package_builder import ReusedPackage
 
 
 class BatchWorkflowTests(unittest.TestCase):
+    def test_retry_planning_respects_explicit_sku_and_detail_limits(self) -> None:
+        manifest = self.root / "generation-manifest.json"
+        images = []
+        for category, count in (("sku", 12), ("detail", 20)):
+            for ordinal in range(1, count + 1):
+                image = self.root / f"{category}-{ordinal}.jpg"
+                image.write_bytes(category.encode("ascii"))
+                images.append({"type": category, "path": str(image)})
+        manifest.write_text(json.dumps({"images": images}), encoding="utf-8")
+
+        planned = plan_batch_retry_ordinals(
+            manifest,
+            ("sku", "detail"),
+            [],
+            max_main_images=10,
+            max_sku_images=5,
+            max_detail_images=6,
+        )
+
+        self.assertEqual(planned["sku"], [1, 2, 3, 4, 5])
+        self.assertEqual(planned["detail"], [1, 2, 3, 4, 5, 6])
+
     def test_direct_link_shared_hit_skips_collector_and_generator(self) -> None:
         workbook = self.root / "shared-hit.xlsx"
         workbook.write_bytes(b"workbook")
