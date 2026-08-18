@@ -227,7 +227,7 @@ class ApiSettings:
     base_url: str
     vision_api_key: str
     image_api_key: str
-    vision_model: str = "gpt-5.6-sol"
+    vision_model: str = "gpt-5.5"
     image_model: str = "gpt-image-2"
 
     def endpoint(self, path: str) -> str:

@@ -3,6 +3,11 @@ setlocal EnableExtensions
 chcp 65001 >nul
 set "ROOT=%~dp0"
 set "PYTHON=%ROOT%.venv\Scripts\python.exe"
+set "WORKFLOW_ROOT=%ROOT:~0,-1%"
+set "WORKFLOW_EXE=%ROOT%ProductImageWorkflow.exe"
+set "WORKFLOW_PYTHON=%PYTHON%"
+set "WORKFLOW_STDOUT=%ROOT%service.stdout.log"
+set "WORKFLOW_STDERR=%ROOT%service.stderr.log"
 set "DEFAULT_URL=http://127.0.0.1:8765"
 set "URL="
 
@@ -15,7 +20,8 @@ if not errorlevel 1 (
 
 if exist "%ROOT%ProductImageWorkflow.exe" (
     del /q "%ROOT%startup_url.txt" "%ROOT%startup_error.log" 2>nul
-    start "" /b "%ROOT%ProductImageWorkflow.exe" --no-browser
+    powershell.exe -NoProfile -Command "$process = Start-Process -FilePath $env:WORKFLOW_EXE -ArgumentList '--no-browser' -WorkingDirectory $env:WORKFLOW_ROOT -WindowStyle Hidden -RedirectStandardOutput $env:WORKFLOW_STDOUT -RedirectStandardError $env:WORKFLOW_STDERR -PassThru; if ($process.HasExited) { exit $process.ExitCode }"
+    if errorlevel 1 goto :failed
     for /l %%i in (1,1,15) do (
         if exist "%ROOT%startup_url.txt" goto :ready
         timeout /t 1 /nobreak >nul
@@ -29,7 +35,7 @@ if not exist "%ROOT%bootstrap.ps1" (
     exit /b 1
 )
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%bootstrap.ps1" -Mode Ensure -NonInteractive -Root "%ROOT%"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%bootstrap.ps1" -Mode Ensure -NonInteractive -Root "%ROOT:~0,-1%"
 if errorlevel 1 (
     echo.
     echo Runtime bootstrap failed. Check the network and the error above.
@@ -38,7 +44,8 @@ if errorlevel 1 (
 )
 
 del /q "%ROOT%startup_url.txt" "%ROOT%startup_error.log" 2>nul
-start "" /b "%PYTHON%" "%ROOT%web_app.py" --no-browser
+powershell.exe -NoProfile -Command "$arguments = @('-m', 'web_app', '--no-browser'); $process = Start-Process -FilePath $env:WORKFLOW_PYTHON -ArgumentList $arguments -WorkingDirectory $env:WORKFLOW_ROOT -WindowStyle Hidden -RedirectStandardOutput $env:WORKFLOW_STDOUT -RedirectStandardError $env:WORKFLOW_STDERR -PassThru; if ($process.HasExited) { exit $process.ExitCode }"
+if errorlevel 1 goto :failed
 for /l %%i in (1,1,15) do (
     if exist "%ROOT%startup_url.txt" goto :ready
     timeout /t 1 /nobreak >nul

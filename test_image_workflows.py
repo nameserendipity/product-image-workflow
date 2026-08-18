@@ -25,14 +25,14 @@ def _test_png_bytes(size: tuple[int, int] = (32, 32)) -> bytes:
 
 
 class ApiSettingsTests(unittest.TestCase):
-    def test_api_settings_defaults_to_gpt_5_6_sol(self):
+    def test_api_settings_defaults_to_gpt_5_5(self):
         settings = image_workflows.ApiSettings(
             base_url="https://api.example",
             vision_api_key="vision-key",
             image_api_key="image-key",
         )
 
-        self.assertEqual(settings.vision_model, "gpt-5.6-sol")
+        self.assertEqual(settings.vision_model, "gpt-5.5")
 
 
 class PromptCompositionTests(unittest.TestCase):

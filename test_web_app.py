@@ -15,11 +15,11 @@ class GenerationErrorMessageTests(unittest.TestCase):
 
         unauthorized = handler._friendly_generation_error("HTTP 401: invalid token")
         unavailable = handler._friendly_generation_error(
-            "model_not_found: gpt-5.6-sol is unavailable"
+            "model_not_found: gpt-5.5 is unavailable"
         )
 
-        self.assertIn("gpt-5.6-sol", unauthorized)
-        self.assertIn("gpt-5.6-sol", unavailable)
+        self.assertIn("gpt-5.5", unauthorized)
+        self.assertIn("gpt-5.5", unavailable)
 from agent_flow import AgentSession
 from batch_workflow import DirectLinkBatchItem, DirectReplaceBatchItem, save_batch_results
 from shared_library_client import CatalogPage, LockLease, SharedLibraryUnavailable, SharedProbe
@@ -798,12 +798,15 @@ class AppStateTaskIsolationTests(unittest.TestCase):
     def test_portable_launcher_disables_executable_browser_autostart(self):
         launcher = Path(web_app.__file__).with_name("启动程序.bat").read_text(encoding="utf-8")
 
+        self.assertNotIn('start "" /b', launcher)
+        self.assertIn('Start-Process -FilePath $env:WORKFLOW_EXE', launcher)
+        self.assertIn('Start-Process -FilePath $env:WORKFLOW_PYTHON', launcher)
+        self.assertIn("@('-m', 'web_app', '--no-browser')", launcher)
+        self.assertIn('-WindowStyle Hidden', launcher)
+        self.assertIn('-RedirectStandardOutput $env:WORKFLOW_STDOUT', launcher)
+        self.assertIn('-RedirectStandardError $env:WORKFLOW_STDERR', launcher)
         self.assertIn(
-            'start "" /b "%ROOT%ProductImageWorkflow.exe" --no-browser',
-            launcher,
-        )
-        self.assertIn(
-            'bootstrap.ps1" -Mode Ensure -NonInteractive -Root "%ROOT%"',
+            'bootstrap.ps1" -Mode Ensure -NonInteractive -Root "%ROOT:~0,-1%"',
             launcher,
         )
 
