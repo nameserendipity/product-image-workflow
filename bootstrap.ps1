@@ -96,7 +96,7 @@ function Ensure-PythonRuntime($Manifest) {
         New-Item -ItemType Directory -Force -Path $target | Out-Null
         $arguments = @(
             "/quiet", "InstallAllUsers=0", "Include_launcher=0", "Include_pip=1",
-            "Include_test=0", "PrependPath=0", "Shortcuts=0", "TargetDir=$target"
+            "Include_test=0", "PrependPath=0", "Shortcuts=0", "TargetDir=`"$target`""
         )
         $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
         if ($process.ExitCode -ne 0) { throw "Python 安装失败，退出码 $($process.ExitCode)。" }

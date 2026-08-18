@@ -845,6 +845,20 @@ class AppStateTaskIsolationTests(unittest.TestCase):
             launcher,
         )
 
+    def test_portable_launcher_reuses_only_healthy_loopback_startup_marker(self):
+        launcher = Path(web_app.__file__).with_name("启动程序.bat").read_text(encoding="utf-8")
+        marker_start = launcher.index('if exist "%ROOT%startup_url.txt" (')
+        default_probe = launcher.index('curl.exe --silent --fail --max-time 2 "%DEFAULT_URL%/api/status"')
+        marker_block = launcher[marker_start:default_probe]
+
+        self.assertLess(marker_start, default_probe)
+        self.assertIn('[Uri]::TryCreate($raw, [UriKind]::Absolute, [ref]$candidate)', marker_block)
+        self.assertIn("$candidate.Scheme -ne 'http' -or $candidate.Host -ne '127.0.0.1'", marker_block)
+        self.assertIn("$health.Path = '/api/status'", marker_block)
+        self.assertIn('Invoke-WebRequest -UseBasicParsing -Uri $health.Uri.AbsoluteUri -TimeoutSec 2', marker_block)
+        self.assertIn('if defined URL goto :ready', marker_block)
+        self.assertIn('set "URL="', marker_block)
+
     def test_app_state_restores_persisted_model_api_keys(self):
         web_app.SETTINGS_PATH.write_text(
             json.dumps(

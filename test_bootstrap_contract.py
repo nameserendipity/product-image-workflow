@@ -43,6 +43,10 @@ class BootstrapContractTests(unittest.TestCase):
         marker_index = body.index('Set-Content -LiteralPath $marker')
         self.assertLess(create_index, marker_index)
 
+    def test_quotes_python_runtime_install_target(self) -> None:
+        self.assertIn('"TargetDir=`"$target`""', self.script)
+        self.assertNotIn('"TargetDir=$target"', self.script)
+
     @unittest.skipUnless(__import__("platform").system() == "Windows", "PowerShell contract smoke test is Windows-only")
     def test_check_mode_is_non_interactive(self) -> None:
         result = subprocess.run(

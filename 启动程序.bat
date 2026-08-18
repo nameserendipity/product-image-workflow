@@ -12,6 +12,12 @@ set "DEFAULT_URL=http://127.0.0.1:8765"
 set "URL="
 
 rem Reuse an already running service instead of starting a duplicate.
+if exist "%ROOT%startup_url.txt" (
+    for /f "usebackq delims=" %%U in (`powershell.exe -NoProfile -Command "$raw = (Get-Content -LiteralPath (Join-Path $env:WORKFLOW_ROOT 'startup_url.txt') -Raw).Trim(); $candidate = $null; if (-not [Uri]::TryCreate($raw, [UriKind]::Absolute, [ref]$candidate)) { exit 1 }; if ($candidate.Scheme -ne 'http' -or $candidate.Host -ne '127.0.0.1') { exit 1 }; try { $health = [UriBuilder]$candidate; $health.Path = '/api/status'; $health.Query = ''; $health.Fragment = ''; $response = Invoke-WebRequest -UseBasicParsing -Uri $health.Uri.AbsoluteUri -TimeoutSec 2; if ($response.StatusCode -ne 200) { exit 1 }; $candidate.GetLeftPart([UriPartial]::Authority) } catch { exit 1 }"`) do set "URL=%%U"
+    if defined URL goto :ready
+    set "URL="
+)
+
 curl.exe --silent --fail --max-time 2 "%DEFAULT_URL%/api/status" >nul 2>nul
 if not errorlevel 1 (
     set "URL=%DEFAULT_URL%"
